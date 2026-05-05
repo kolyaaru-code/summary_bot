@@ -152,7 +152,7 @@ def get_ai_summary(messages_text, timeframe_text, message_count: int):
 ВОТ ЧТО БЫЛО:
 {messages_text}
 """
-    for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+    for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"]:
         try:
             completion = client.chat.completions.create(
                 model=model,
