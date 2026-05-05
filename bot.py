@@ -16,15 +16,15 @@ ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-MAX_VOICE_SIZE_MB = 5  # Лимит размера голосового в МБ
-MAX_MESSAGE_LENGTH = 4000  # Лимит длины ответа Telegram
-MAX_TEXT_LENGTH = 4000  # Лимит длины сохраняемого сообщения
+MAX_VOICE_SIZE_MB = 5
+MAX_MESSAGE_LENGTH = 4000
+MAX_TEXT_LENGTH = 4000
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 client = Groq(api_key=GROQ_KEY)
 
-# 2. ПУЛ СОЕДИНЕНИЙ С БД (вместо нового соединения на каждый запрос)
+# 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
 
 def init_db_pool():
@@ -54,7 +54,6 @@ def init_db():
         release_conn(conn)
 
 def save_message(chat_id, user_name, text):
-    # Обрезаем слишком длинные сообщения
     text = text[:MAX_TEXT_LENGTH] if len(text) > MAX_TEXT_LENGTH else text
     conn = get_conn()
     try:
@@ -88,18 +87,15 @@ def cleanup_old_messages():
 
 # 3. ТРАНСКРИБАЦИЯ ГОЛОСА
 async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str | None:
-    # Проверяем размер файла ДО скачивания
     size_mb = file_size / (1024 * 1024)
     if size_mb > MAX_VOICE_SIZE_MB:
         print(f"Файл слишком большой: {size_mb:.1f} МБ — пропускаем")
         return f"[файл слишком большой для распознавания: {size_mb:.1f} МБ]"
-
     try:
         buffer = io.BytesIO()
         await bot.download(file_id, destination=buffer)
         buffer.seek(0)
         buffer.name = filename
-
         transcription = client.audio.transcriptions.create(
             model="whisper-large-v3-turbo",
             file=buffer,
@@ -111,8 +107,6 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
 
 # 4. ИНТЕЛЛЕКТ
 def get_ai_summary(messages_text, timeframe_text, message_count: int):
-    
-    # Адаптируем стиль под объём чата
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток, не раздувай из мухи слона."
     elif message_count < 50:
@@ -123,6 +117,7 @@ def get_ai_summary(messages_text, timeframe_text, message_count: int):
     prompt = f"""
 Ты — легендарный летописец этого чата. Циничный, острый, но справедливый.
 Ты видел всё и всех насквозь. Тебя не обмануть и не задобрить.
+Ты старый кореш этого чата. Любишь всех, но никому не даёшь спуску.
 
 ВВОДНЫЕ ДАННЫЕ:
 - Период: {timeframe_text}
@@ -149,7 +144,6 @@ def get_ai_summary(messages_text, timeframe_text, message_count: int):
 ЗАПРЕЩЕНО:
 - Шаблонные заголовки типа "ГЛАВНЫЙ КЛОУН" или "ВРЕМЯ ХАОСА" — придумывай своё каждый раз.
 - Растягивать текст если сказать нечего.
-- Быть вежливым там где надо резать правду.
 - Быть мягким и обтекаемым — это не про тебя.
 - Щадить чувства — тоже.
 
@@ -158,13 +152,21 @@ def get_ai_summary(messages_text, timeframe_text, message_count: int):
 ВОТ ЧТО БЫЛО:
 {messages_text}
 """
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.85,  # Чуть больше творческой свободы
-        max_tokens=1500,   # Разумный лимит
-    )
-    return completion.choices[0].message.content
+    for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+        try:
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.85,
+                max_tokens=1500,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if "rate_limit_exceeded" in str(e):
+                print(f"Модель {model} исчерпала лимит, переключаюсь...")
+                continue
+            raise
+    raise Exception("Все модели исчерпали лимит. Попробуй позже.")
 
 # 5. ФЕЙС-КОНТРОЛЬ
 def is_chat_allowed(chat_id):
@@ -172,11 +174,9 @@ def is_chat_allowed(chat_id):
 
 # 6. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 async def send_long_message(target, text: str):
-    """Разбивает текст на части если он длиннее лимита Telegram"""
     if len(text) <= MAX_MESSAGE_LENGTH:
         await target.edit_text(text, parse_mode="HTML")
         return
-    
     parts = []
     while len(text) > MAX_MESSAGE_LENGTH:
         split_at = text.rfind('\n', 0, MAX_MESSAGE_LENGTH)
@@ -185,7 +185,6 @@ async def send_long_message(target, text: str):
         parts.append(text[:split_at])
         text = text[split_at:].lstrip()
     parts.append(text)
-
     await target.edit_text(parts[0], parse_mode="HTML")
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
@@ -235,7 +234,6 @@ async def cmd_summary(message: types.Message):
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            # Исправленный безопасный запрос без SQL-инъекции
             cursor.execute('''
                 SELECT user_name, message_text, timestamp 
                 FROM history 
@@ -267,7 +265,7 @@ async def cmd_summary(message: types.Message):
         await send_long_message(status_msg, f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}")
     except Exception as e:
         print(f"Ошибка AI: {e}")
-        await status_msg.edit_text("Нейросеть подавилась вашим общением.")
+        await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
 # 8. СБОР СООБЩЕНИЙ
 @dp.message()
@@ -277,7 +275,6 @@ async def collect_messages(message: types.Message):
 
     # Определяем автора — человек, канал или аноним
     if message.sender_chat:
-        # Сообщение от имени канала или анонимного участника
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
     elif message.from_user:
         if message.from_user.is_bot:
@@ -303,7 +300,6 @@ async def collect_messages(message: types.Message):
             print(f"[{author}] 🎤: {text}")
         else:
             save_message(message.chat.id, author, "[🎤 Голосовое]: не удалось распознать")
-            print(f"[{author}] 🎤: не удалось распознать")
 
     # Кружочек
     elif message.video_note:
@@ -317,7 +313,6 @@ async def collect_messages(message: types.Message):
             print(f"[{author}] 📹: {text}")
         else:
             save_message(message.chat.id, author, "[📹 Кружочек]: не удалось распознать")
-            print(f"[{author}] 📹: не удалось распознать")
 
 async def main():
     init_db_pool()
