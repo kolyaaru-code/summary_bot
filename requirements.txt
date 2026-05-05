@@ -2,3 +2,4 @@ aiogram==3.13.0
 python-dotenv
 groq
 psycopg2-binary
+pydantic>=2.9.0
