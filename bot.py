@@ -272,12 +272,19 @@ async def cmd_summary(message: types.Message):
 # 8. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+    return
+
+# Определяем автора — человек, канал или аноним
+if message.sender_chat:
+    # Сообщение от имени канала или анонимного участника
+    author = message.sender_chat.title or message.sender_chat.username or "Канал"
+elif message.from_user:
     if message.from_user.is_bot:
         return
-    if not is_chat_allowed(message.chat.id):
-        return
-
     author = message.from_user.full_name or message.from_user.username or "Аноним"
+else:
+    return
 
     # Текст
     if message.text:
