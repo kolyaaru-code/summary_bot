@@ -19,6 +19,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_TEXT_LENGTH = 4000
+MAX_PROMPT_CHARS = 9000  # жёсткий лимит символов для промпта (~3000 токенов)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -85,7 +86,71 @@ def cleanup_old_messages():
     finally:
         release_conn(conn)
 
-# 3. ТРАНСКРИБАЦИЯ ГОЛОСА
+# 3. УМНАЯ ОБРЕЗКА СООБЩЕНИЙ
+def build_prompt_text(rows: list) -> str:
+    """
+    Умная сборка текста для промпта.
+    
+    Логика:
+    - Берём 40% сообщений с начала периода (завязка)
+    - Берём 20% из середины (развитие)  
+    - Берём 40% с конца периода (финал — самое свежее)
+    
+    Итого: контекст сохраняется, ничего важного не теряется.
+    Плюс жёсткий лимит символов как страховка.
+    """
+    if not rows:
+        return ""
+
+    total = len(rows)
+
+    if total <= 100:
+        # Мало сообщений — берём все
+        selected = rows
+    else:
+        # Умная выборка: начало + середина + конец
+        start_count = int(total * 0.40)
+        mid_count = int(total * 0.20)
+        end_count = int(total * 0.40)
+
+        start = rows[:start_count]
+        mid_start = total // 2 - mid_count // 2
+        mid = rows[mid_start:mid_start + mid_count]
+        end = rows[total - end_count:]
+
+        # Склеиваем без дублей, сохраняем хронологию
+        seen_ids = set()
+        selected = []
+        for r in start + mid + end:
+            key = (r[2], r[0])  # timestamp + user
+            if key not in seen_ids:
+                seen_ids.add(key)
+                selected.append(r)
+        selected.sort(key=lambda x: x[2])  # сортируем по времени
+
+    # Собираем текст с жёстким лимитом символов
+    result = ""
+    prev_time = None
+
+    for r in selected:
+        time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
+
+        # Добавляем разделитель если прошло больше 30 минут
+        if prev_time and (r[2] - prev_time).seconds > 1800:
+            result += f"\n--- пауза ---\n"
+
+        line = f"[{time_str}] {r[0]}: {r[1]}\n"
+
+        if len(result) + len(line) > MAX_PROMPT_CHARS:
+            result += f"[... ещё {total - len(selected)} сообщений не вошло ...]\n"
+            break
+
+        result += line
+        prev_time = r[2]
+
+    return result
+
+# 4. ТРАНСКРИБАЦИЯ ГОЛОСА
 async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str | None:
     size_mb = file_size / (1024 * 1024)
     if size_mb > MAX_VOICE_SIZE_MB:
@@ -105,8 +170,8 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
         print(f"Ошибка транскрибации: {e}")
         return None
 
-# 4. ИНТЕЛЛЕКТ
-def get_ai_summary(messages_text, timeframe_text, message_count: int):
+# 5. ИНТЕЛЛЕКТ
+def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток, не раздувай из мухи слона."
     elif message_count < 50:
@@ -127,7 +192,7 @@ def get_ai_summary(messages_text, timeframe_text, message_count: int):
 КАК ГОВОРИШЬ:
 - Матом — естественно, как в разговоре с друзьями. Не для красоты, а потому что так говоришь.
 - Каждого называешь по имени и припоминаешь что он за человек.
-- Если кто-то нёс хуйею — говоришь прямо: нёс хуйню.
+- Если кто-то нёс хуйню — говоришь прямо: нёс хуйню.
 - Если кто-то был красавчик — говоришь: красавчик, но тут же поддеваешь.
 - Короткие удары. Никакой воды. Никаких "следует отметить" и "таким образом".
 - Пишешь живо, резко, с характером. Как будто рассказываешь другу за пивом.
@@ -168,11 +233,11 @@ def get_ai_summary(messages_text, timeframe_text, message_count: int):
             raise
     raise Exception("Все модели исчерпали лимит. Попробуй позже.")
 
-# 5. ФЕЙС-КОНТРОЛЬ
+# 6. ФЕЙС-КОНТРОЛЬ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-# 6. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
+# 7. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 async def send_long_message(target, text: str):
     if len(text) <= MAX_MESSAGE_LENGTH:
         await target.edit_text(text, parse_mode="HTML")
@@ -189,7 +254,7 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 7. КОМАНДЫ
+# 8. КОМАНДЫ
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -234,7 +299,6 @@ async def cmd_summary(message: types.Message):
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            # Сначала берём все сообщения за период
             cursor.execute('''
                 SELECT user_name, message_text, timestamp 
                 FROM history 
@@ -243,15 +307,6 @@ async def cmd_summary(message: types.Message):
                 ORDER BY timestamp ASC
             ''', (message.chat.id, hours))
             all_rows = cursor.fetchall()
-
-        # Равномерная выборка — берём не больше 150 сообщений
-        MAX_MESSAGES = 200
-        if len(all_rows) <= MAX_MESSAGES:
-            rows = all_rows
-        else:
-            # Берём каждое N-е сообщение равномерно по всему периоду
-            step = len(all_rows) / MAX_MESSAGES
-            rows = [all_rows[int(i * step)] for i in range(MAX_MESSAGES)]
     except Exception as e:
         await status_msg.edit_text("Ошибка при чтении базы данных. Попробуй ещё раз.")
         print(f"Ошибка запроса к БД: {e}")
@@ -259,30 +314,27 @@ async def cmd_summary(message: types.Message):
     finally:
         release_conn(conn)
 
-    if not rows:
+    if not all_rows:
         await status_msg.edit_text("За это время сообщений нет. Либо вы спите, либо я сломался.")
         return
 
-    formatted_chat = ""
-    for r in rows:
-        time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
-        formatted_chat += f"[{time_str}] {r[0]}: {r[1]}\n"
+    # Умная сборка текста
+    formatted_chat = build_prompt_text(all_rows)
 
     try:
-        raw_summary = get_ai_summary(formatted_chat, f"{hours} ч.", len(rows))
+        raw_summary = get_ai_summary(formatted_chat, f"{hours} ч.", len(all_rows))
         safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         await send_long_message(status_msg, f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}")
     except Exception as e:
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 8. СБОР СООБЩЕНИЙ
+# 9. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
-    # Определяем автора — человек, канал или аноним
     if message.sender_chat:
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
     elif message.from_user:
@@ -292,12 +344,10 @@ async def collect_messages(message: types.Message):
     else:
         return
 
-    # Текст
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
 
-    # Голосовое
     elif message.voice:
         text = await transcribe_audio(
             message.voice.file_id,
@@ -310,7 +360,6 @@ async def collect_messages(message: types.Message):
         else:
             save_message(message.chat.id, author, "[🎤 Голосовое]: не удалось распознать")
 
-    # Кружочек
     elif message.video_note:
         text = await transcribe_audio(
             message.video_note.file_id,
