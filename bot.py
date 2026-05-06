@@ -24,7 +24,8 @@ MAX_PROMPT_CHARS = 9000
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-client = Groq(api_key=GROQ_KEY)
+client = Groq(api_key=GROQ_KEY)               # для /summary и голосовых
+client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))  # для Даяны
 
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
@@ -169,7 +170,7 @@ def build_prompt_text(rows: list) -> str:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
 
         if prev_time and (r[2] - prev_time).seconds > 1800:
-            result += f"\n--- пауза ---\n"
+            result += "\n--- пауза ---\n"
 
         line = f"[{time_str}] {r[0]}: {r[1]}\n"
 
@@ -202,7 +203,7 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
         print(f"Ошибка транскрибации: {e}")
         return None
 
-# 5. ИНТЕЛЛЕКТ
+# 5. САММАРИ
 def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток, не раздувай из мухи слона."
@@ -265,11 +266,38 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
             raise
     raise Exception("Все модели исчерпали лимит. Попробуй позже.")
 
-# 6. ФЕЙС-КОНТРОЛЬ
+# 6. ДАЯНА
+def ask_dayana(question: str) -> str:
+    prompt = f"""
+Ты — Даяна. Не ассистент, не бот, не помощник. Даяна.
+Ты — секретарша со стальными нервами и острым языком.
+Умная, собранная, всё замечаешь. Говоришь только по делу — но если надо, можешь срезать одной фразой.
+
+КАК ГОВОРИШЬ:
+- Чётко и по существу. Никакой воды.
+- Можешь быть саркастичной если вопрос того заслуживает.
+- Не грубишь без причины — но и нежничать не будешь.
+- Если вопрос тупой — скажешь об этом прямо, но всё равно ответишь.
+- Никаких "конечно!", "отличный вопрос!", "я рада помочь".
+- Говоришь как живой человек, не как справочник.
+- Отвечаешь на русском языке.
+
+ВОПРОС:
+{question}
+"""
+    completion = client_dayana.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.8,
+        max_tokens=800,
+    )
+    return completion.choices[0].message.content
+
+# 7. ФЕЙС-КОНТРОЛЬ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-# 7. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
+# 8. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 async def send_long_message(target, text: str):
     if len(text) <= MAX_MESSAGE_LENGTH:
         await target.edit_text(text, parse_mode="HTML")
@@ -286,7 +314,7 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 8. КОМАНДЫ
+# 9. КОМАНДЫ
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -304,7 +332,8 @@ async def cmd_help(message: types.Message):
         "🎤 Голосовые и кружочки тоже учитываются\n\n"
         "🎮 /game — найди писюн\n"
         "🍆 /peepee — рейтинг охотников\n"
-        "📊 /mypeepee — твоя статистика"
+        "📊 /mypeepee — твоя статистика\n\n"
+        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну"
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -509,12 +538,13 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 9. СБОР СООБЩЕНИЙ
+# 10. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
+    # Определяем автора
     if message.sender_chat:
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
     elif message.from_user:
@@ -524,6 +554,25 @@ async def collect_messages(message: types.Message):
     else:
         return
 
+    # Проверяем триггер Даяны ДО сохранения в историю
+    if message.text:
+        text_lower = message.text.lower()
+        if "даяна" in text_lower and "ответь" in text_lower:
+            try:
+                idx = text_lower.index("ответь") + len("ответь")
+                question = message.text[idx:].strip()
+                if not question:
+                    await message.reply("Ответь на что? Вопрос забыл.")
+                    return
+                answer = ask_dayana(question)
+                safe_answer = answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка Даяны: {e}")
+                await message.reply("Не могу ответить прямо сейчас.")
+            return  # не сохраняем запрос к Даяне в историю
+
+    # Сохраняем обычные сообщения
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
