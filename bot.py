@@ -1,6 +1,7 @@
 import asyncio
 import os
 import io
+import random
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -19,7 +20,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_TEXT_LENGTH = 4000
-MAX_PROMPT_CHARS = 9000  # жёсткий лимит символов для промпта (~3000 токенов)
+MAX_PROMPT_CHARS = 9000
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -49,6 +50,14 @@ def init_db():
                               user_name TEXT, 
                               message_text TEXT, 
                               timestamp TIMESTAMPTZ DEFAULT NOW())''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS peepee_scores
+                             (id SERIAL PRIMARY KEY,
+                              chat_id BIGINT,
+                              user_id BIGINT,
+                              user_name TEXT,
+                              wins INTEGER DEFAULT 0,
+                              losses INTEGER DEFAULT 0,
+                              UNIQUE(chat_id, user_id))''')
         conn.commit()
         print("БД инициализирована")
     finally:
@@ -86,29 +95,55 @@ def cleanup_old_messages():
     finally:
         release_conn(conn)
 
+def update_peepee_score(chat_id: int, user_id: int, user_name: str, won: bool):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                INSERT INTO peepee_scores (chat_id, user_id, user_name, wins, losses)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    user_name = EXCLUDED.user_name,
+                    wins = peepee_scores.wins + %s,
+                    losses = peepee_scores.losses + %s
+            ''', (
+                chat_id, user_id, user_name,
+                1 if won else 0,
+                0 if won else 1,
+                1 if won else 0,
+                0 if won else 1,
+            ))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка обновления счёта: {e}")
+        conn.rollback()
+    finally:
+        release_conn(conn)
+
+def get_peepee_scores(chat_id: int) -> list:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_name, wins, losses
+                FROM peepee_scores
+                WHERE chat_id = %s AND (wins + losses) > 0
+                ORDER BY wins DESC, losses ASC
+            ''', (chat_id,))
+            return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
 # 3. УМНАЯ ОБРЕЗКА СООБЩЕНИЙ
 def build_prompt_text(rows: list) -> str:
-    """
-    Умная сборка текста для промпта.
-    
-    Логика:
-    - Берём 40% сообщений с начала периода (завязка)
-    - Берём 20% из середины (развитие)  
-    - Берём 40% с конца периода (финал — самое свежее)
-    
-    Итого: контекст сохраняется, ничего важного не теряется.
-    Плюс жёсткий лимит символов как страховка.
-    """
     if not rows:
         return ""
 
     total = len(rows)
 
     if total <= 100:
-        # Мало сообщений — берём все
         selected = rows
     else:
-        # Умная выборка: начало + середина + конец
         start_count = int(total * 0.40)
         mid_count = int(total * 0.20)
         end_count = int(total * 0.40)
@@ -118,24 +153,21 @@ def build_prompt_text(rows: list) -> str:
         mid = rows[mid_start:mid_start + mid_count]
         end = rows[total - end_count:]
 
-        # Склеиваем без дублей, сохраняем хронологию
         seen_ids = set()
         selected = []
         for r in start + mid + end:
-            key = (r[2], r[0])  # timestamp + user
+            key = (r[2], r[0])
             if key not in seen_ids:
                 seen_ids.add(key)
                 selected.append(r)
-        selected.sort(key=lambda x: x[2])  # сортируем по времени
+        selected.sort(key=lambda x: x[2])
 
-    # Собираем текст с жёстким лимитом символов
     result = ""
     prev_time = None
 
     for r in selected:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
 
-        # Добавляем разделитель если прошло больше 30 минут
         if prev_time and (r[2] - prev_time).seconds > 1800:
             result += f"\n--- пауза ---\n"
 
@@ -269,8 +301,10 @@ async def cmd_help(message: types.Message):
         "/id — узнать ID этого чата\n"
         "/help — это сообщение\n\n"
         "⚠️ Максимум: 48 часов за один запрос\n"
+        "🎤 Голосовые и кружочки тоже учитываются\n\n"
         "🎮 /game — найди писюн\n"
-        "🎤 Голосовые и кружочки тоже учитываются"
+        "🍆 /peepee — рейтинг охотников\n"
+        "📊 /mypeepee — твоя статистика"
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -279,10 +313,7 @@ async def cmd_game(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
-    import random
-    boxes = ["📦"] * 9
     winner_pos = random.randint(0, 8)
-
     keyboard = []
     row = []
     for i in range(9):
@@ -297,15 +328,16 @@ async def cmd_game(message: types.Message):
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     await message.answer("🎮 Найди писюн! Открой одну коробку:", reply_markup=markup)
 
-
 @dp.callback_query(lambda c: c.data.startswith("box_"))
 async def process_box(callback: types.CallbackQuery):
-    import random
-
     parts = callback.data.split("_")
     chosen = int(parts[1])
     winner = int(parts[2])
     name = callback.from_user.first_name or "Анон"
+    user_id = callback.from_user.id
+
+    won = chosen == winner
+    update_peepee_score(callback.message.chat.id, user_id, name, won)
 
     keyboard = []
     row = []
@@ -340,18 +372,87 @@ async def process_box(callback: types.CallbackQuery):
         f"🤡 {name}, серьёзно? Писюн в коробке {winner + 1} сидел и ждал, а ты мимо.",
     ]
 
-    if chosen == winner:
-        result = random.choice(win_taunts)
-    else:
-        result = random.choice(lose_taunts)
-
+    result = random.choice(win_taunts) if won else random.choice(lose_taunts)
     await callback.message.edit_text(result, reply_markup=markup)
     await callback.answer()
-
 
 @dp.callback_query(lambda c: c.data == "done")
 async def process_done(callback: types.CallbackQuery):
     await callback.answer("Игра уже закончена!", show_alert=False)
+
+@dp.message(Command("peepee"))
+async def cmd_peepee(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+        return
+
+    rows = get_peepee_scores(message.chat.id)
+
+    if not rows:
+        await message.answer("Ещё никто не играл. Введи /game и начни позориться!")
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    text = "<b>🍆 Рейтинг охотников за писюном:</b>\n\n"
+
+    for i, (name, wins, losses) in enumerate(rows):
+        total = wins + losses
+        pct = int((wins / total) * 100) if total > 0 else 0
+        if i < 3:
+            medal = medals[i]
+        elif i == len(rows) - 1 and len(rows) > 3:
+            medal = "💩"
+        else:
+            medal = "▪️"
+        text += f"{medal} {name} — {wins} нашёл / {losses} мимо ({pct}%)\n"
+
+    if len(rows) > 1:
+        loser = rows[-1]
+        text += f"\n🤡 Главный мимострел: <b>{loser[0]}</b>"
+
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message(Command("mypeepee"))
+async def cmd_mypeepee(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+        return
+
+    user_id = message.from_user.id
+    name = message.from_user.first_name or "Анон"
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT wins, losses FROM peepee_scores
+                WHERE chat_id = %s AND user_id = %s
+            ''', (message.chat.id, user_id))
+            row = cursor.fetchone()
+    finally:
+        release_conn(conn)
+
+    if not row:
+        await message.answer(f"{name}, ты ещё не играл. Введи /game!")
+        return
+
+    wins, losses = row
+    total = wins + losses
+    pct = int((wins / total) * 100) if total > 0 else 0
+
+    if pct >= 60:
+        verdict = "Настоящий охотник 🏆"
+    elif pct >= 40:
+        verdict = "Так себе, но бывает 🤷"
+    else:
+        verdict = "Позор семьи 💩"
+
+    text = (
+        f"🍆 <b>Статистика {name}:</b>\n\n"
+        f"Нашёл: {wins}\n"
+        f"Промазал: {losses}\n"
+        f"Точность: {pct}%\n\n"
+        f"Вердикт: {verdict}"
+    )
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("summary"))
 async def cmd_summary(message: types.Message):
@@ -398,7 +499,6 @@ async def cmd_summary(message: types.Message):
         await status_msg.edit_text("За это время сообщений нет. Либо вы спите, либо я сломался.")
         return
 
-    # Умная сборка текста
     formatted_chat = build_prompt_text(all_rows)
 
     try:
