@@ -59,7 +59,6 @@ def init_db():
                               wins INTEGER DEFAULT 0,
                               losses INTEGER DEFAULT 0,
                               UNIQUE(chat_id, user_id))''')
-            # Новая таблица для вопросов к Даяне
             cursor.execute('''CREATE TABLE IF NOT EXISTS dayana_questions
                              (id SERIAL PRIMARY KEY,
                               chat_id BIGINT,
@@ -88,7 +87,6 @@ def save_message(chat_id, user_name, text):
         release_conn(conn)
 
 def save_dayana_question(chat_id, user_name, question):
-    """Сохраняем вопрос к Даяне в отдельную таблицу"""
     question = question[:500] if len(question) > 500 else question
     conn = get_conn()
     try:
@@ -105,7 +103,6 @@ def save_dayana_question(chat_id, user_name, question):
         release_conn(conn)
 
 def get_dayana_questions(chat_id: int, hours: int) -> list:
-    """Берём рандомные 3 вопроса к Даяне за период"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -118,6 +115,23 @@ def get_dayana_questions(chat_id: int, hours: int) -> list:
                 LIMIT 3
             ''', (chat_id, hours))
             return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
+def get_last_messages(chat_id: int, limit: int = 10) -> list:
+    """Берём последние N сообщений из чата для контекста Даяны"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_name, message_text, timestamp
+                FROM history
+                WHERE chat_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            ''', (chat_id, limit))
+            rows = cursor.fetchall()
+            return list(reversed(rows))  # возвращаем в хронологическом порядке
     finally:
         release_conn(conn)
 
@@ -227,6 +241,14 @@ def build_prompt_text(rows: list) -> str:
 
     return result
 
+def format_context(rows: list) -> str:
+    """Форматируем последние сообщения для контекста Даяны"""
+    result = ""
+    for r in rows:
+        time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
+        result += f"[{time_str}] {r[0]}: {r[1]}\n"
+    return result
+
 # 4. ТРАНСКРИБАЦИЯ ГОЛОСА
 async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str | None:
     size_mb = file_size / (1024 * 1024)
@@ -249,7 +271,6 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
 
 # 5. БЛОК ДАЯНЫ ДЛЯ САММАРИ
 def get_dayana_block(questions: list) -> str:
-    """Просим AI прокомментировать вопросы к Даяне с лёгким стебом"""
     if not questions:
         return ""
 
@@ -281,7 +302,6 @@ def get_dayana_block(questions: list) -> str:
         return completion.choices[0].message.content
     except Exception as e:
         print(f"Ошибка блока Даяны: {e}")
-        # Если AI недоступен — возвращаем просто список вопросов
         return "\n".join([f"• {q[0]} спрашивал(а): {q[1]}" for q in questions])
 
 # 6. САММАРИ
@@ -374,11 +394,65 @@ def ask_dayana(question: str) -> str:
     )
     return completion.choices[0].message.content
 
-# 8. ФЕЙС-КОНТРОЛЬ
+# 8. ДАЯНА — РАССУДИТЬ СПОР
+def dayana_judge(context: str) -> str:
+    prompt = f"""
+Ты — Даяна. Секретарша со стальными нервами, острым языком и абсолютным чувством справедливости.
+Тебя попросили рассудить спор или ситуацию в чате.
+
+КАК ГОВОРИШЬ:
+- Читаешь контекст, выносишь чёткий вердикт — кто прав, кто нет и почему.
+- Никаких "с одной стороны... с другой стороны". Ты говоришь прямо.
+- Можешь поддеть того кто неправ — но справедливо, не злобно.
+- Если все неправы — скажи об этом прямо.
+- Коротко и по делу. Максимум 5-6 предложений.
+- Отвечаешь на русском языке.
+
+ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:
+{context}
+
+Вынеси вердикт.
+"""
+    completion = client_dayana.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.8,
+        max_tokens=500,
+    )
+    return completion.choices[0].message.content
+
+# 9. ДАЯНА — КТО ВИНОВАТ
+def dayana_guilty(context: str) -> str:
+    prompt = f"""
+Ты — Даяна. Секретарша с холодной головой и острым взглядом.
+Тебя попросили назначить виноватого в последних событиях чата.
+
+КАК ГОВОРИШЬ:
+- Читаешь контекст и чётко называешь кто виноват и почему.
+- Никаких отмазок и расплывчатых формулировок — конкретное имя и конкретная причина.
+- Можешь быть саркастичной — но справедливой.
+- Если все виноваты — распредели вину по справедливости.
+- Коротко: назначила виноватого, объяснила почему, точка.
+- Отвечаешь на русском языке.
+
+ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:
+{context}
+
+Назначь виноватого.
+"""
+    completion = client_dayana.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.8,
+        max_tokens=400,
+    )
+    return completion.choices[0].message.content
+
+# 10. ФЕЙС-КОНТРОЛЬ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-# 9. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
+# 11. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 async def send_long_message(target, text: str):
     if len(text) <= MAX_MESSAGE_LENGTH:
         await target.edit_text(text, parse_mode="HTML")
@@ -395,7 +469,7 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 10. КОМАНДЫ
+# 12. КОМАНДЫ
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -414,7 +488,9 @@ async def cmd_help(message: types.Message):
         "🎮 /game — найди писюн\n"
         "🍆 /peepee — рейтинг охотников\n"
         "📊 /mypeepee — твоя статистика\n\n"
-        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну"
+        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
+        "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
+        "👉 <b>Даяна кто виноват</b> — назначить виноватого"
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -616,7 +692,6 @@ async def cmd_summary(message: types.Message):
         safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         full_text = f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}"
 
-        # Добавляем блок Даяны если были вопросы
         dayana_questions = get_dayana_questions(message.chat.id, hours)
         if dayana_questions:
             dayana_comments = get_dayana_block(dayana_questions)
@@ -628,7 +703,7 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 11. СБОР СООБЩЕНИЙ
+# 13. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
@@ -644,9 +719,11 @@ async def collect_messages(message: types.Message):
     else:
         return
 
-    # Проверяем триггер Даяны ДО сохранения в историю
+    # Проверяем триггеры Даяны ДО сохранения в историю
     if message.text:
         text_lower = message.text.lower()
+
+        # Триггер: "Даяна, ответь [вопрос]"
         if "даяна" in text_lower and "ответь" in text_lower:
             try:
                 idx = text_lower.index("ответь") + len("ответь")
@@ -654,16 +731,46 @@ async def collect_messages(message: types.Message):
                 if not question:
                     await message.reply("Ответь на что? Вопрос забыл.")
                     return
-                # Сохраняем вопрос в отдельную таблицу
                 save_dayana_question(message.chat.id, author, question)
-                # Получаем ответ
                 answer = ask_dayana(question)
                 safe_answer = answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
             except Exception as e:
-                print(f"Ошибка Даяны: {e}")
+                print(f"Ошибка Даяны (ответь): {e}")
                 await message.reply("Не могу ответить прямо сейчас.")
-            return  # не сохраняем в основную историю
+            return
+
+        # Триггер: "Даяна рассуди"
+        if "даяна" in text_lower and "рассуди" in text_lower:
+            try:
+                rows = get_last_messages(message.chat.id, limit=10)
+                if not rows:
+                    await message.reply("Не о чём рассуждать — чат пустой.")
+                    return
+                context = format_context(rows)
+                verdict = dayana_judge(context)
+                safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await message.reply(f"<b>⚖️ Даяна:</b>\n\n{safe_verdict}", parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка Даяны (рассуди): {e}")
+                await message.reply("Не могу рассудить прямо сейчас.")
+            return
+
+        # Триггер: "Даяна кто виноват"
+        if "даяна" in text_lower and "виноват" in text_lower:
+            try:
+                rows = get_last_messages(message.chat.id, limit=10)
+                if not rows:
+                    await message.reply("Не в чем разбираться — чат пустой.")
+                    return
+                context = format_context(rows)
+                guilty = dayana_guilty(context)
+                safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await message.reply(f"<b>👉 Даяна:</b>\n\n{safe_guilty}", parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка Даяны (виноват): {e}")
+                await message.reply("Не могу разобраться прямо сейчас.")
+            return
 
     # Сохраняем обычные сообщения
     if message.text:
