@@ -240,7 +240,7 @@ async def cmd_summary(message: types.Message):
                 WHERE chat_id = %s 
                 AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
                 ORDER BY timestamp ASC
-                LIMIT 300
+                LIMIT 1000
             ''', (message.chat.id, hours))
             rows = cursor.fetchall()
     except Exception as e:
