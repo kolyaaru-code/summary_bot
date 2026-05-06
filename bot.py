@@ -269,9 +269,89 @@ async def cmd_help(message: types.Message):
         "/id — узнать ID этого чата\n"
         "/help — это сообщение\n\n"
         "⚠️ Максимум: 48 часов за один запрос\n"
+        "🎮 /game — найди писюн\n"
         "🎤 Голосовые и кружочки тоже учитываются"
     )
     await message.answer(help_text, parse_mode="HTML")
+
+@dp.message(Command("game"))
+async def cmd_game(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+        return
+
+    import random
+    boxes = ["📦"] * 9
+    winner_pos = random.randint(0, 8)
+
+    keyboard = []
+    row = []
+    for i in range(9):
+        row.append(types.InlineKeyboardButton(
+            text="📦",
+            callback_data=f"box_{i}_{winner_pos}"
+        ))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await message.answer("🎮 Найди писюн! Открой одну коробку:", reply_markup=markup)
+
+
+@dp.callback_query(lambda c: c.data.startswith("box_"))
+async def process_box(callback: types.CallbackQuery):
+    import random
+
+    parts = callback.data.split("_")
+    chosen = int(parts[1])
+    winner = int(parts[2])
+    name = callback.from_user.first_name or "Анон"
+
+    keyboard = []
+    row = []
+    for i in range(9):
+        if i == winner:
+            text = "🍆"
+        elif i == chosen and chosen != winner:
+            text = "💨"
+        else:
+            text = "📦"
+        row.append(types.InlineKeyboardButton(
+            text=text,
+            callback_data="done"
+        ))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    win_taunts = [
+        f"🍆 {name} нашёл! Ну и что, теперь что с ним делать будешь?",
+        f"🎉 {name} везунчик, нашёл писюн. Маме расскажи.",
+        f"🍆 {name} нашёл писюн. Видимо не первый раз ищет.",
+        f"🎉 Ну надо же, {name} справился. Запиши в резюме.",
+    ]
+
+    lose_taunts = [
+        f"💨 {name}, ну ты лох. Писюн был в коробке {winner + 1}, а ты куда полез?",
+        f"🗑 {name} не нашёл. Руки из жопы, коробка {winner + 1} же была очевидна.",
+        f"💨 {name} промазал мимо писюна. Это талант — коробка {winner + 1} прямо смотрела на тебя.",
+        f"🤡 {name}, серьёзно? Писюн в коробке {winner + 1} сидел и ждал, а ты мимо.",
+    ]
+
+    if chosen == winner:
+        result = random.choice(win_taunts)
+    else:
+        result = random.choice(lose_taunts)
+
+    await callback.message.edit_text(result, reply_markup=markup)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "done")
+async def process_done(callback: types.CallbackQuery):
+    await callback.answer("Игра уже закончена!", show_alert=False)
 
 @dp.message(Command("summary"))
 async def cmd_summary(message: types.Message):
