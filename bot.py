@@ -59,6 +59,13 @@ def init_db():
                               wins INTEGER DEFAULT 0,
                               losses INTEGER DEFAULT 0,
                               UNIQUE(chat_id, user_id))''')
+            # Новая таблица для вопросов к Даяне
+            cursor.execute('''CREATE TABLE IF NOT EXISTS dayana_questions
+                             (id SERIAL PRIMARY KEY,
+                              chat_id BIGINT,
+                              user_name TEXT,
+                              question TEXT,
+                              timestamp TIMESTAMPTZ DEFAULT NOW())''')
         conn.commit()
         print("БД инициализирована")
     finally:
@@ -80,6 +87,40 @@ def save_message(chat_id, user_name, text):
     finally:
         release_conn(conn)
 
+def save_dayana_question(chat_id, user_name, question):
+    """Сохраняем вопрос к Даяне в отдельную таблицу"""
+    question = question[:500] if len(question) > 500 else question
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO dayana_questions (chat_id, user_name, question) VALUES (%s, %s, %s)',
+                (chat_id, user_name, question)
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка сохранения вопроса к Даяне: {e}")
+        conn.rollback()
+    finally:
+        release_conn(conn)
+
+def get_dayana_questions(chat_id: int, hours: int) -> list:
+    """Берём рандомные 3 вопроса к Даяне за период"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_name, question
+                FROM dayana_questions
+                WHERE chat_id = %s
+                AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+                ORDER BY RANDOM()
+                LIMIT 3
+            ''', (chat_id, hours))
+            return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
 def cleanup_old_messages():
     conn = get_conn()
     try:
@@ -87,9 +128,12 @@ def cleanup_old_messages():
             cursor.execute(
                 "DELETE FROM history WHERE timestamp < NOW() - INTERVAL '7 days'"
             )
+            cursor.execute(
+                "DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '7 days'"
+            )
             deleted = cursor.rowcount
         conn.commit()
-        print(f"Очистка БД: удалено {deleted} старых сообщений")
+        print(f"Очистка БД: удалено {deleted} старых записей")
     except Exception as e:
         print(f"Ошибка очистки БД: {e}")
         conn.rollback()
@@ -203,7 +247,43 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
         print(f"Ошибка транскрибации: {e}")
         return None
 
-# 5. САММАРИ
+# 5. БЛОК ДАЯНЫ ДЛЯ САММАРИ
+def get_dayana_block(questions: list) -> str:
+    """Просим AI прокомментировать вопросы к Даяне с лёгким стебом"""
+    if not questions:
+        return ""
+
+    questions_text = "\n".join([f"- {q[0]} спрашивал(а): {q[1]}" for q in questions])
+
+    prompt = f"""
+Ты — Батя этого чата. Твоя подруга Даяна — умная строгая девушка, которую участники чата постоянно мучают вопросами.
+Твоя задача: коротко и с лёгким стебом прокомментировать каждый вопрос который ей задали.
+
+СТИЛЬ:
+- Короткий стеб над человеком который задал вопрос — одно-два предложения максимум.
+- Не злобно, но метко. Как будто говоришь "ну и зачем ты это спросил, дружище".
+- Разговорный язык, можно немного мата.
+- Каждый вопрос — отдельная строка, начинается с "• ".
+
+ВОПРОСЫ К ДАЯНЕ:
+{questions_text}
+
+Выдай только список с комментариями, без заголовков и вступлений.
+"""
+    try:
+        completion = client_dayana.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.85,
+            max_tokens=400,
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        print(f"Ошибка блока Даяны: {e}")
+        # Если AI недоступен — возвращаем просто список вопросов
+        return "\n".join([f"• {q[0]} спрашивал(а): {q[1]}" for q in questions])
+
+# 6. САММАРИ
 def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток, не раздувай из мухи слона."
@@ -266,7 +346,7 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
             raise
     raise Exception("Все модели исчерпали лимит. Попробуй позже.")
 
-# 6. ДАЯНА
+# 7. ДАЯНА — ОТВЕТ НА ВОПРОС
 def ask_dayana(question: str) -> str:
     prompt = f"""
 Ты — Даяна. Не ассистент, не бот, не помощник. Даяна.
@@ -293,11 +373,11 @@ def ask_dayana(question: str) -> str:
     )
     return completion.choices[0].message.content
 
-# 7. ФЕЙС-КОНТРОЛЬ
+# 8. ФЕЙС-КОНТРОЛЬ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-# 8. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
+# 9. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 async def send_long_message(target, text: str):
     if len(text) <= MAX_MESSAGE_LENGTH:
         await target.edit_text(text, parse_mode="HTML")
@@ -314,7 +394,7 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 9. КОМАНДЫ
+# 10. КОМАНДЫ
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -533,12 +613,21 @@ async def cmd_summary(message: types.Message):
     try:
         raw_summary = get_ai_summary(formatted_chat, f"{hours} ч.", len(all_rows))
         safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        await send_long_message(status_msg, f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}")
+        full_text = f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}"
+
+        # Добавляем блок Даяны если были вопросы
+        dayana_questions = get_dayana_questions(message.chat.id, hours)
+        if dayana_questions:
+            dayana_comments = get_dayana_block(dayana_questions)
+            safe_dayana = dayana_comments.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            full_text += f"\n\n<b>🔮 КАК ВЫ МУЧАЛИ МОЮ ПОДРУГУ ДАЯНУ:</b>\n\n{safe_dayana}"
+
+        await send_long_message(status_msg, full_text)
     except Exception as e:
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 10. СБОР СООБЩЕНИЙ
+# 11. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
@@ -564,13 +653,16 @@ async def collect_messages(message: types.Message):
                 if not question:
                     await message.reply("Ответь на что? Вопрос забыл.")
                     return
+                # Сохраняем вопрос в отдельную таблицу
+                save_dayana_question(message.chat.id, author, question)
+                # Получаем ответ
                 answer = ask_dayana(question)
                 safe_answer = answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
             except Exception as e:
                 print(f"Ошибка Даяны: {e}")
                 await message.reply("Не могу ответить прямо сейчас.")
-            return  # не сохраняем запрос к Даяне в историю
+            return  # не сохраняем в основную историю
 
     # Сохраняем обычные сообщения
     if message.text:
