@@ -245,7 +245,7 @@ async def cmd_summary(message: types.Message):
             all_rows = cursor.fetchall()
 
         # Равномерная выборка — берём не больше 150 сообщений
-        MAX_MESSAGES = 250
+        MAX_MESSAGES = 200
         if len(all_rows) <= MAX_MESSAGES:
             rows = all_rows
         else:
