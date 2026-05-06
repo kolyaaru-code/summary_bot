@@ -743,7 +743,7 @@ async def collect_messages(message: types.Message):
         # Триггер: "Даяна рассуди"
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
-                rows = get_last_messages(message.chat.id, limit=10)
+                rows = get_last_messages(message.chat.id, limit=20)
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
