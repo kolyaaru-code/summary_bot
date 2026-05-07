@@ -2,6 +2,9 @@ import asyncio
 import os
 import io
 import random
+import time
+import json
+import base64
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -21,6 +24,7 @@ TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 RAILWAY_URL = os.getenv("RAILWAY_URL", "")
 GAME_URL = "https://kolyaaru-code.github.io/summary_bot/"
+TOKEN_TTL = 300  # токен живёт 5 минут
 
 MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
@@ -29,8 +33,8 @@ MAX_PROMPT_CHARS = 9000
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-client = Groq(api_key=GROQ_KEY)               # для /summary и голосовых
-client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))  # для Даяны
+client = Groq(api_key=GROQ_KEY)
+client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))
 
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
@@ -124,7 +128,6 @@ def get_dayana_questions(chat_id: int, hours: int) -> list:
         release_conn(conn)
 
 def get_last_messages(chat_id: int, limit: int = 10) -> list:
-    """Берём последние N сообщений из чата для контекста Даяны"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -136,7 +139,7 @@ def get_last_messages(chat_id: int, limit: int = 10) -> list:
                 LIMIT %s
             ''', (chat_id, limit))
             rows = cursor.fetchall()
-            return list(reversed(rows))  # возвращаем в хронологическом порядке
+            return list(reversed(rows))
     finally:
         release_conn(conn)
 
@@ -202,21 +205,17 @@ def get_peepee_scores(chat_id: int) -> list:
 def build_prompt_text(rows: list) -> str:
     if not rows:
         return ""
-
     total = len(rows)
-
     if total <= 100:
         selected = rows
     else:
         start_count = int(total * 0.40)
         mid_count = int(total * 0.20)
         end_count = int(total * 0.40)
-
         start = rows[:start_count]
         mid_start = total // 2 - mid_count // 2
         mid = rows[mid_start:mid_start + mid_count]
         end = rows[total - end_count:]
-
         seen_ids = set()
         selected = []
         for r in start + mid + end:
@@ -225,29 +224,21 @@ def build_prompt_text(rows: list) -> str:
                 seen_ids.add(key)
                 selected.append(r)
         selected.sort(key=lambda x: x[2])
-
     result = ""
     prev_time = None
-
     for r in selected:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
-
         if prev_time and (r[2] - prev_time).seconds > 1800:
             result += "\n--- пауза ---\n"
-
         line = f"[{time_str}] {r[0]}: {r[1]}\n"
-
         if len(result) + len(line) > MAX_PROMPT_CHARS:
             result += f"[... ещё {total - len(selected)} сообщений не вошло ...]\n"
             break
-
         result += line
         prev_time = r[2]
-
     return result
 
 def format_context(rows: list) -> str:
-    """Форматируем последние сообщения для контекста Даяны"""
     result = ""
     for r in rows:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
@@ -278,9 +269,7 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
 def get_dayana_block(questions: list) -> str:
     if not questions:
         return ""
-
     questions_text = "\n".join([f"- {q[0]} спрашивал(а): {q[1]}" for q in questions])
-
     prompt = f"""
 Ты — Батя этого чата. Твоя подруга Даяна — умная строгая девушка, которую участники чата постоянно мучают вопросами.
 Твоя задача: коротко и с лёгким стебом прокомментировать каждый вопрос который ей задали.
@@ -317,7 +306,6 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
         volume_instruction = "Средняя активность — стандартный разбор."
     else:
         volume_instruction = "Чат бурлил — можешь развернуться, но без воды."
-
     prompt = f"""
 Ты — Батя этого чата. Не модератор, не ведущий, не журналист. Батя.
 Ты знаешь всех в лицо, помнишь кто что говорил месяц назад и не даёшь никому забыть об этом.
@@ -477,49 +465,72 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 12. ВЕБ-СЕРВЕР — ПРОВЕРКА ПОДПИСИ TELEGRAM
-def verify_telegram_data(init_data: str) -> bool:
-    if not init_data:
-        return False
+# 12. ТОКЕНЫ ДЛЯ ИГРЫ
+def generate_game_token(user_id: int, user_name: str) -> str:
+    """Генерируем подписанный токен с данными игрока и временем создания"""
+    payload = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "ts": int(time.time())
+    }
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode()
+    signature = hmac.new(
+        TOKEN.encode(),
+        payload_b64.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return f"{payload_b64}.{signature}"
+
+def verify_game_token(token: str) -> dict | None:
+    """Проверяем токен — возвращаем данные игрока или None если токен недействителен"""
     try:
-        pairs = dict(p.split("=", 1) for p in init_data.split("&") if "=" in p)
-        received_hash = pairs.pop("hash", None)
-        if not received_hash:
-            return False
-        data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
-        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
-        calculated = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(calculated, received_hash)
+        payload_b64, signature = token.rsplit(".", 1)
+        expected = hmac.new(
+            TOKEN.encode(),
+            payload_b64.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            print("Неверная подпись токена")
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode())
+        age = int(time.time()) - payload.get("ts", 0)
+        if age > TOKEN_TTL:
+            print(f"Токен просрочен: {age} сек")
+            return None
+        return payload
     except Exception as e:
-        print(f"Ошибка верификации: {e}")
-        return False
+        print(f"Ошибка проверки токена: {e}")
+        return None
 
 # 13. ВЕБ-СЕРВЕР — ЭНДПОИНТЫ
 async def handle_result(request):
-    """Принимает результат игры от Mini App и пишет в БД"""
+    """Принимает результат игры от страницы и записывает в БД"""
     try:
         data = await request.json()
-        init_data = data.get("initData", "")
+        token = data.get("token", "")
         won = data.get("won")
-        user_id = data.get("user_id")
-        user_name = data.get("user_name", "Анон")
 
-        if not verify_telegram_data(init_data):
-            print(f"Неверная подпись от user_id={user_id}")
+        payload = verify_game_token(token)
+        if not payload:
             return web.json_response({"error": "Unauthorized"}, status=401)
 
-        if won is None or user_id is None:
+        if won is None:
             return web.json_response({"error": "Missing fields"}, status=400)
+
+        user_id = payload["user_id"]
+        user_name = payload["user_name"]
 
         update_peepee_score(ALLOWED_CHAT_ID, int(user_id), user_name, bool(won))
         print(f"Результат записан: {user_name} — {'победа' if won else 'поражение'}")
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "user_name": user_name})
     except Exception as e:
         print(f"Ошибка handle_result: {e}")
         return web.json_response({"error": str(e)}, status=500)
 
 async def handle_scores(request):
-    """Отдаёт таблицу лидеров для отображения в Mini App"""
+    """Отдаёт таблицу лидеров для страницы игры"""
     try:
         rows = get_peepee_scores(ALLOWED_CHAT_ID)
         scores = [{"name": r[0], "wins": r[1], "losses": r[2]} for r in rows]
@@ -528,7 +539,7 @@ async def handle_scores(request):
         print(f"Ошибка handle_scores: {e}")
         return web.json_response({"error": str(e)}, status=500)
 
-# 14. ВЕБ-СЕРВЕР — CORS (разрешаем запросы с GitHub Pages)
+# 14. CORS — разрешаем запросы с GitHub Pages
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
@@ -570,13 +581,28 @@ async def cmd_game(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
+    user = message.from_user
+    if not user:
+        return
+
+    user_id = user.id
+    user_name = user.full_name or user.username or "Анон"
+
+    token = generate_game_token(user_id, user_name)
+    game_link = f"{GAME_URL}?token={token}"
+
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(
-            text="🎮 Играть",
-            web_app=types.WebAppInfo(url=GAME_URL)
+            text=f"🎮 Играть — ссылка для {user_name}",
+            url=game_link
         )
     ]])
-    await message.answer("🍆 Найди писюн!", reply_markup=keyboard)
+    await message.answer(
+        f"🍆 <b>{user_name}</b>, найди писюн!\n"
+        f"<i>Ссылка действует 5 минут — только для тебя</i>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
 
 @dp.message(Command("peepee"))
 async def cmd_peepee(message: types.Message):
@@ -721,7 +747,6 @@ async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
-    # Определяем автора
     if message.sender_chat:
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
     elif message.from_user:
@@ -731,11 +756,9 @@ async def collect_messages(message: types.Message):
     else:
         return
 
-    # Проверяем триггеры Даяны ДО сохранения в историю
     if message.text:
         text_lower = message.text.lower()
 
-        # Триггер: "Даяна, ответь [вопрос]"
         if "даяна" in text_lower and "ответь" in text_lower:
             try:
                 idx = text_lower.index("ответь") + len("ответь")
@@ -752,7 +775,6 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу ответить прямо сейчас.")
             return
 
-        # Триггер: "Даяна рассуди"
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
                 rows = get_last_messages(message.chat.id, limit=20)
@@ -768,7 +790,6 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу рассудить прямо сейчас.")
             return
 
-        # Триггер: "Даяна кто виноват"
         if "даяна" in text_lower and "виноват" in text_lower:
             try:
                 rows = get_last_messages(message.chat.id, limit=10)
@@ -784,7 +805,6 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
 
-    # Сохраняем обычные сообщения
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
