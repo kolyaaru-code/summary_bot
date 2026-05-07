@@ -19,6 +19,8 @@ GROQ_KEY = os.getenv("GROQ_KEY")
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
+RAILWAY_URL = os.getenv("RAILWAY_URL", "")
+GAME_URL = "https://kolyaaru-code.github.io/summary_bot/"
 
 MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
@@ -475,7 +477,70 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 12. КОМАНДЫ
+# 12. ВЕБ-СЕРВЕР — ПРОВЕРКА ПОДПИСИ TELEGRAM
+def verify_telegram_data(init_data: str) -> bool:
+    if not init_data:
+        return False
+    try:
+        pairs = dict(p.split("=", 1) for p in init_data.split("&") if "=" in p)
+        received_hash = pairs.pop("hash", None)
+        if not received_hash:
+            return False
+        data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        calculated = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(calculated, received_hash)
+    except Exception as e:
+        print(f"Ошибка верификации: {e}")
+        return False
+
+# 13. ВЕБ-СЕРВЕР — ЭНДПОИНТЫ
+async def handle_result(request):
+    """Принимает результат игры от Mini App и пишет в БД"""
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "")
+        won = data.get("won")
+        user_id = data.get("user_id")
+        user_name = data.get("user_name", "Анон")
+
+        if not verify_telegram_data(init_data):
+            print(f"Неверная подпись от user_id={user_id}")
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        if won is None or user_id is None:
+            return web.json_response({"error": "Missing fields"}, status=400)
+
+        update_peepee_score(ALLOWED_CHAT_ID, int(user_id), user_name, bool(won))
+        print(f"Результат записан: {user_name} — {'победа' if won else 'поражение'}")
+        return web.json_response({"ok": True})
+    except Exception as e:
+        print(f"Ошибка handle_result: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+async def handle_scores(request):
+    """Отдаёт таблицу лидеров для отображения в Mini App"""
+    try:
+        rows = get_peepee_scores(ALLOWED_CHAT_ID)
+        scores = [{"name": r[0], "wins": r[1], "losses": r[2]} for r in rows]
+        return web.json_response({"scores": scores})
+    except Exception as e:
+        print(f"Ошибка handle_scores: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+# 14. ВЕБ-СЕРВЕР — CORS (разрешаем запросы с GitHub Pages)
+@web.middleware
+async def cors_middleware(request, handler):
+    if request.method == "OPTIONS":
+        response = web.Response()
+    else:
+        response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+# 15. КОМАНДЫ БОТА
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -505,72 +570,13 @@ async def cmd_game(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
-    winner_pos = random.randint(0, 8)
-    keyboard = []
-    row = []
-    for i in range(9):
-        row.append(types.InlineKeyboardButton(
-            text="📦",
-            callback_data=f"box_{i}_{winner_pos}"
-        ))
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-
-    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-    await message.answer("🎮 Найди писюн! Открой одну коробку:", reply_markup=markup)
-
-@dp.callback_query(lambda c: c.data.startswith("box_"))
-async def process_box(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    chosen = int(parts[1])
-    winner = int(parts[2])
-    name = callback.from_user.first_name or "Анон"
-    user_id = callback.from_user.id
-
-    won = chosen == winner
-    update_peepee_score(callback.message.chat.id, user_id, name, won)
-
-    keyboard = []
-    row = []
-    for i in range(9):
-        if i == winner:
-            text = "🍆"
-        elif i == chosen and chosen != winner:
-            text = "💨"
-        else:
-            text = "📦"
-        row.append(types.InlineKeyboardButton(
-            text=text,
-            callback_data="done"
-        ))
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-
-    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    win_taunts = [
-        f"🍆 {name} нашёл! Ну и что, теперь что с ним делать будешь?",
-        f"🎉 {name} везунчик, нашёл писюн. Маме расскажи.",
-        f"🍆 {name} нашёл писюн. Видимо не первый раз ищет.",
-        f"🎉 Ну надо же, {name} справился. Запиши в резюме.",
-    ]
-
-    lose_taunts = [
-        f"💨 {name}, ну ты лох. Писюн был в коробке {winner + 1}, а ты куда полез?",
-        f"🗑 {name} не нашёл. Руки из жопы, коробка {winner + 1} же была очевидна.",
-        f"💨 {name} промазал мимо писюна. Это талант — коробка {winner + 1} прямо смотрела на тебя.",
-        f"🤡 {name}, серьёзно? Писюн в коробке {winner + 1} сидел и ждал, а ты мимо.",
-    ]
-
-    result = random.choice(win_taunts) if won else random.choice(lose_taunts)
-    await callback.message.edit_text(result, reply_markup=markup)
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data == "done")
-async def process_done(callback: types.CallbackQuery):
-    await callback.answer("Игра уже закончена!", show_alert=False)
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(
+            text="🎮 Играть",
+            web_app=types.WebAppInfo(url=GAME_URL)
+        )
+    ]])
+    await message.answer("🍆 Найди писюн!", reply_markup=keyboard)
 
 @dp.message(Command("peepee"))
 async def cmd_peepee(message: types.Message):
@@ -709,7 +715,7 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 13. СБОР СООБЩЕНИЙ
+# 16. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
@@ -813,7 +819,12 @@ async def main():
     cleanup_old_messages()
     print("Бот запущен и готов к работе!")
 
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
+    app.router.add_post("/result", handle_result)
+    app.router.add_get("/scores", handle_scores)
+    app.router.add_route("OPTIONS", "/result", lambda r: web.Response())
+    app.router.add_route("OPTIONS", "/scores", lambda r: web.Response())
+
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 8080))
