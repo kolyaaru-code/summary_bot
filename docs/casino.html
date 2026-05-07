@@ -31,59 +31,85 @@
     font-family:'Onest',sans-serif;
   }
 
-  /* Фоновые огни */
   body::before {
     content:'';
     position:fixed; inset:0;
     background:
       radial-gradient(ellipse 60% 40% at 50% 0%, rgba(255,215,0,0.06) 0%, transparent 70%),
-      radial-gradient(ellipse 40% 30% at 80% 80%, rgba(255,0,80,0.05) 0%, transparent 60%);
+      radial-gradient(ellipse 40% 30% at 80% 80%, rgba(255,0,80,0.04) 0%, transparent 60%);
     pointer-events:none;
   }
 
   .app {
     height:100dvh;
-    display:flex;
-    flex-direction:column;
+    display:flex; flex-direction:column;
     padding:clamp(8px,2.5vw,16px);
-    gap:clamp(6px,1.8vw,10px);
-    max-width:440px;
-    margin:0 auto;
+    gap:clamp(5px,1.5vw,9px);
+    max-width:440px; margin:0 auto;
     animation:fadeIn 0.4s ease;
-    position:relative;
   }
   @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
 
-  /* HEADER */
+  /* ── HEADER ── */
   .header {
     display:flex; align-items:center; justify-content:space-between;
     flex-shrink:0;
   }
   .logo {
     font-family:'Unbounded',sans-serif;
-    font-size:clamp(14px,4vw,19px);
-    font-weight:900;
+    font-size:clamp(14px,4vw,19px); font-weight:900;
     background:linear-gradient(135deg,var(--gold),var(--gold2),#fff8dc);
     -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-    letter-spacing:-0.5px;
   }
   .balance-badge {
     background:var(--surface2);
     border:1.5px solid var(--gold);
-    border-radius:30px;
-    padding:6px 14px;
+    border-radius:30px; padding:6px 14px;
     font-family:'Unbounded',sans-serif;
-    font-size:clamp(11px,3vw,13px);
-    font-weight:700;
-    color:var(--gold);
-    white-space:nowrap;
+    font-size:clamp(11px,3vw,13px); font-weight:700;
+    color:var(--gold); white-space:nowrap;
     transition:all 0.4s ease;
   }
-  .balance-badge.win { color:var(--green); border-color:var(--green); }
-  .balance-badge.lose { color:var(--red); border-color:var(--red); }
+  .balance-badge.win  { color:var(--green); border-color:var(--green); }
+  .balance-badge.lose { color:var(--red);   border-color:var(--red); }
   .balance-badge.negative { color:var(--red); border-color:var(--red); }
 
-  /* TABS */
+  /* ── PLAYER STRIP ── */
+  .player-strip {
+    flex-shrink:0;
+    background:linear-gradient(135deg, rgba(255,215,0,0.1), rgba(255,170,0,0.05));
+    border:1.5px solid rgba(255,215,0,0.35);
+    border-radius:12px;
+    padding:clamp(8px,2vw,11px) clamp(12px,3vw,18px);
+    display:flex; align-items:center; gap:10px;
+  }
+  .player-avatar {
+    width:clamp(32px,8vw,40px); height:clamp(32px,8vw,40px);
+    background:linear-gradient(135deg,var(--gold),var(--gold2));
+    border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:clamp(16px,4.5vw,20px);
+    flex-shrink:0;
+  }
+  .player-info { flex:1; min-width:0; }
+  .player-label {
+    font-size:clamp(9px,2.2vw,11px);
+    color:var(--muted); font-weight:500;
+    text-transform:uppercase; letter-spacing:0.8px;
+  }
+  .player-name {
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(13px,3.5vw,16px); font-weight:900;
+    color:var(--gold);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .player-warning {
+    font-size:clamp(9px,2.2vw,10px);
+    color:rgba(255,215,0,0.5);
+    white-space:nowrap;
+  }
+
+  /* ── TABS ── */
   .tabs {
     display:flex; gap:5px; flex-shrink:0;
     background:var(--surface);
@@ -91,7 +117,7 @@
     border-radius:12px; padding:4px;
   }
   .tab {
-    flex:1; padding:clamp(7px,2vw,10px);
+    flex:1; padding:clamp(7px,1.8vw,10px);
     border-radius:9px; border:none;
     background:transparent; color:var(--muted);
     font-family:'Unbounded',sans-serif;
@@ -100,11 +126,55 @@
   }
   .tab.active { background:var(--surface2); color:var(--text); box-shadow:0 1px 8px rgba(0,0,0,0.5); }
 
-  /* PANELS */
-  .panel { display:none; flex:1; flex-direction:column; min-height:0; gap:clamp(6px,1.8vw,10px); overflow:hidden; }
+  /* ── PANELS ── */
+  .panel { display:none; flex:1; flex-direction:column; min-height:0; gap:clamp(5px,1.5vw,9px); overflow:hidden; }
   .panel.active { display:flex; }
 
-  /* SLOT MACHINE */
+  /* ── COMMENT BOX (теперь большой и заметный) ── */
+  .comment-box {
+    flex-shrink:0;
+    border-radius:var(--radius);
+    padding:clamp(10px,2.5vw,14px) clamp(12px,3vw,16px);
+    font-size:clamp(13px,3.5vw,15px);
+    font-weight:600;
+    line-height:1.45;
+    text-align:center;
+    color:var(--muted);
+    font-style:italic;
+    background:var(--surface);
+    border:1.5px solid var(--border);
+    min-height:clamp(52px,12vw,66px);
+    display:flex; align-items:center; justify-content:center;
+    transition:all 0.35s ease;
+  }
+  .comment-box.win-comment {
+    color:var(--green);
+    border-color:rgba(0,230,118,0.45);
+    background:rgba(0,230,118,0.07);
+    font-style:normal;
+    font-size:clamp(13px,3.8vw,16px);
+  }
+  .comment-box.lose-comment {
+    color:var(--red);
+    border-color:rgba(255,23,68,0.45);
+    background:rgba(255,23,68,0.07);
+    font-style:normal;
+    font-size:clamp(13px,3.8vw,16px);
+  }
+  .comment-box.jackpot-comment {
+    color:var(--gold); border-color:var(--gold);
+    background:rgba(255,215,0,0.08);
+    font-style:normal; font-weight:700;
+    font-size:clamp(13px,3.8vw,16px);
+    box-shadow:0 0 24px rgba(255,215,0,0.2);
+    animation:jackpotPulse 1s ease infinite alternate;
+  }
+  @keyframes jackpotPulse {
+    from{box-shadow:0 0 10px rgba(255,215,0,0.15)}
+    to{box-shadow:0 0 35px rgba(255,215,0,0.5)}
+  }
+
+  /* ── SLOT MACHINE ── */
   .machine {
     flex:1; min-height:0;
     display:flex; flex-direction:column;
@@ -112,66 +182,53 @@
     background:var(--surface);
     border:1.5px solid var(--border);
     border-radius:clamp(16px,4vw,24px);
-    padding:clamp(10px,3vw,18px);
-    position:relative;
-    overflow:hidden;
+    padding:clamp(8px,2.5vw,14px);
+    position:relative; overflow:hidden;
   }
   .machine::before {
-    content:'';
-    position:absolute; top:0; left:0; right:0; height:2px;
+    content:''; position:absolute; top:0; left:0; right:0; height:2px;
     background:linear-gradient(90deg,transparent,var(--gold),transparent);
   }
 
-  /* REELS */
   .reels-wrap {
-    display:flex; gap:clamp(8px,2.5vw,14px);
-    align-items:center;
+    display:flex; gap:clamp(8px,2.5vw,14px); align-items:center;
   }
   .reel {
-    width:clamp(72px,20vw,95px);
-    height:clamp(72px,20vw,95px);
+    width:clamp(70px,19vw,90px); height:clamp(70px,19vw,90px);
     background:var(--surface2);
     border:2px solid var(--border);
     border-radius:clamp(12px,3vw,18px);
     display:flex; align-items:center; justify-content:center;
-    font-size:clamp(32px,9vw,46px);
-    position:relative;
-    overflow:hidden;
+    font-size:clamp(30px,8.5vw,44px);
+    position:relative; overflow:hidden;
     transition:border-color 0.3s ease;
   }
-  .reel.spinning {
-    animation:reelSpin 0.12s linear infinite;
-    border-color:var(--gold);
-  }
+  .reel.spinning { animation:reelSpin 0.1s linear infinite; border-color:var(--gold); }
   .reel.win-flash { border-color:var(--gold); animation:winFlash 0.6s ease; }
   .reel.lose-flash { border-color:var(--red); }
 
   @keyframes reelSpin {
-    0%{transform:translateY(0)} 50%{transform:translateY(-8px)} 100%{transform:translateY(0)}
+    0%{transform:translateY(0)} 50%{transform:translateY(-7px)} 100%{transform:translateY(0)}
   }
   @keyframes winFlash {
-    0%{transform:scale(1)} 30%{transform:scale(1.15)} 60%{transform:scale(0.95)} 100%{transform:scale(1)}
+    0%{transform:scale(1)} 30%{transform:scale(1.13)} 65%{transform:scale(0.96)} 100%{transform:scale(1)}
   }
 
-  /* BET SELECTOR */
+  /* ── BET ── */
   .bet-section { width:100%; }
   .bet-label {
     font-family:'Unbounded',sans-serif;
-    font-size:clamp(9px,2.3vw,11px);
-    font-weight:700; color:var(--muted);
-    text-transform:uppercase; letter-spacing:1px;
+    font-size:clamp(9px,2.2vw,11px); font-weight:700;
+    color:var(--muted); text-transform:uppercase; letter-spacing:1px;
     margin-bottom:6px; text-align:center;
   }
-  .bet-buttons {
-    display:flex; gap:6px; justify-content:center;
-  }
+  .bet-buttons { display:flex; gap:6px; justify-content:center; }
   .bet-btn {
     flex:1; max-width:90px;
     padding:clamp(8px,2vw,11px) 4px;
     border-radius:10px;
     border:1.5px solid var(--border);
-    background:var(--surface2);
-    color:var(--muted);
+    background:var(--surface2); color:var(--muted);
     font-family:'Unbounded',sans-serif;
     font-size:clamp(10px,2.5vw,12px); font-weight:700;
     cursor:pointer; transition:all 0.15s ease;
@@ -182,55 +239,26 @@
     background:rgba(255,215,0,0.08);
     box-shadow:0 0 12px rgba(255,215,0,0.15);
   }
-  .bet-btn:disabled { opacity:0.4; cursor:default; }
+  .bet-btn:disabled { opacity:0.35; cursor:default; }
 
-  /* SPIN BUTTON */
+  /* ── SPIN BTN ── */
   .spin-btn {
     width:100%; max-width:260px;
-    padding:clamp(12px,3vw,16px);
-    border-radius:var(--radius);
-    border:none;
+    padding:clamp(12px,3vw,15px);
+    border-radius:var(--radius); border:none;
     background:linear-gradient(135deg,var(--gold),var(--gold2));
     color:#0a0a0c;
     font-family:'Unbounded',sans-serif;
     font-size:clamp(13px,3.5vw,15px); font-weight:900;
-    cursor:pointer;
-    transition:transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
-    letter-spacing:0.3px;
+    cursor:pointer; letter-spacing:0.3px;
+    transition:transform 0.15s, opacity 0.15s, box-shadow 0.15s;
     box-shadow:0 4px 20px rgba(255,215,0,0.25);
   }
   .spin-btn:hover:not(:disabled) { transform:scale(1.03); box-shadow:0 6px 28px rgba(255,215,0,0.35); }
   .spin-btn:active:not(:disabled) { transform:scale(0.97); }
-  .spin-btn:disabled { opacity:0.5; cursor:default; transform:none; }
+  .spin-btn:disabled { opacity:0.45; cursor:default; transform:none; }
 
-  /* COMMENT */
-  .comment-box {
-    width:100%;
-    background:var(--surface2);
-    border:1.5px solid var(--border);
-    border-radius:var(--radius);
-    padding:clamp(10px,2.5vw,14px) clamp(12px,3vw,16px);
-    font-size:clamp(12px,3vw,14px);
-    line-height:1.5;
-    text-align:center;
-    color:var(--muted);
-    font-style:italic;
-    min-height:clamp(44px,10vw,56px);
-    display:flex; align-items:center; justify-content:center;
-    transition:all 0.3s ease;
-    flex-shrink:0;
-  }
-  .comment-box.win-comment { color:var(--green); border-color:rgba(0,230,118,0.3); font-style:normal; }
-  .comment-box.lose-comment { color:var(--red); border-color:rgba(255,23,68,0.3); font-style:normal; }
-  .comment-box.jackpot-comment {
-    color:var(--gold); border-color:var(--gold);
-    font-style:normal; font-weight:600;
-    box-shadow:0 0 20px rgba(255,215,0,0.2);
-    animation:jackpotPulse 1s ease infinite alternate;
-  }
-  @keyframes jackpotPulse { from{box-shadow:0 0 10px rgba(255,215,0,0.2)} to{box-shadow:0 0 30px rgba(255,215,0,0.5)} }
-
-  /* LEADERBOARD */
+  /* ── LEADERBOARD ── */
   .leaderboard {
     flex:1; min-height:0;
     background:var(--surface);
@@ -246,10 +274,7 @@
     color:var(--muted); letter-spacing:1px; text-transform:uppercase;
     flex-shrink:0;
   }
-  .lb-list {
-    flex:1; overflow-y:auto; padding:clamp(6px,1.5vw,10px);
-    scrollbar-width:none;
-  }
+  .lb-list { flex:1; overflow-y:auto; padding:clamp(6px,1.5vw,10px); scrollbar-width:none; }
   .lb-list::-webkit-scrollbar { display:none; }
   .lb-row {
     display:grid; grid-template-columns:28px 1fr auto;
@@ -262,25 +287,15 @@
     background:linear-gradient(135deg,rgba(255,215,0,0.08),rgba(255,215,0,0.02));
     border:1px solid rgba(255,215,0,0.2);
   }
-  .lb-rank {
-    font-family:'Unbounded',sans-serif;
-    font-size:clamp(11px,2.8vw,13px); font-weight:700; text-align:center;
-  }
-  .lb-name {
-    font-size:clamp(12px,3vw,14px); font-weight:500;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  }
+  .lb-rank { font-family:'Unbounded',sans-serif; font-size:clamp(11px,2.8vw,13px); font-weight:700; text-align:center; }
+  .lb-name { font-size:clamp(12px,3vw,14px); font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .lb-name.me-label { color:var(--gold); }
-  .lb-balance {
-    font-family:'Unbounded',sans-serif;
-    font-size:clamp(11px,2.8vw,13px); font-weight:700;
-    text-align:right; white-space:nowrap;
-  }
+  .lb-balance { font-family:'Unbounded',sans-serif; font-size:clamp(11px,2.8vw,13px); font-weight:700; text-align:right; white-space:nowrap; }
   .lb-balance.positive { color:var(--green); }
   .lb-balance.negative { color:var(--red); }
   .lb-empty { text-align:center; color:var(--muted); padding:24px; font-size:13px; }
 
-  /* SCREENS */
+  /* ── SCREENS ── */
   .loading-screen, .expired-screen {
     display:flex; flex-direction:column;
     align-items:center; justify-content:center;
@@ -299,20 +314,11 @@
 
   .hidden { display:none !important; }
 
-  /* WIN RAIN */
-  .win-rain {
-    position:fixed; inset:0; pointer-events:none; z-index:100;
-    display:none;
-  }
+  /* ── WIN RAIN ── */
+  .win-rain { position:fixed; inset:0; pointer-events:none; z-index:100; display:none; }
   .win-rain.show { display:block; }
-  .coin {
-    position:absolute; top:-30px;
-    font-size:22px;
-    animation:fall linear forwards;
-  }
-  @keyframes fall {
-    to { transform:translateY(110vh) rotate(720deg); opacity:0; }
-  }
+  .coin { position:absolute; top:-30px; font-size:22px; animation:fall linear forwards; }
+  @keyframes fall { to{transform:translateY(110vh) rotate(720deg); opacity:0;} }
 </style>
 </head>
 <body>
@@ -332,11 +338,23 @@
 
 <div class="app hidden" id="mainApp">
 
+  <!-- HEADER -->
   <div class="header">
     <div class="logo">🎰 Казино</div>
     <div class="balance-badge" id="balanceBadge">$...</div>
   </div>
 
+  <!-- PLAYER STRIP -->
+  <div class="player-strip">
+    <div class="player-avatar">🎲</div>
+    <div class="player-info">
+      <div class="player-label">Сейчас играет</div>
+      <div class="player-name" id="playerName">—</div>
+    </div>
+    <div class="player-warning">Только твоя<br>ссылка</div>
+  </div>
+
+  <!-- TABS -->
   <div class="tabs">
     <button class="tab active" id="tabGame" onclick="switchTab('game')">🎰 Слоты</button>
     <button class="tab" id="tabLb" onclick="switchTab('lb')">💰 Рейтинг</button>
@@ -345,6 +363,10 @@
   <!-- GAME PANEL -->
   <div class="panel active" id="panelGame">
 
+    <!-- Комментарий ВЫШЕ слотов, большой и заметный -->
+    <div class="comment-box" id="commentBox">Добро пожаловать. Твои деньги скоро станут нашими.</div>
+
+    <!-- Слот машина -->
     <div class="machine">
       <div class="reels-wrap">
         <div class="reel" id="reel0">🎰</div>
@@ -365,8 +387,6 @@
       <button class="spin-btn" id="spinBtn" onclick="doSpin()">🎰 КРУТИТЬ</button>
     </div>
 
-    <div class="comment-box" id="commentBox">Нажми крутить и пусть удача решит твою судьбу</div>
-
   </div>
 
   <!-- LEADERBOARD PANEL -->
@@ -383,9 +403,9 @@
 
 <script>
   const RAILWAY = "https://summarybot-production-0954.up.railway.app";
-  const SYMBOLS = ['🍒','🍋','7️⃣','💎','🍆','🎲','⭐','💫'];
   const TOKEN_TTL = 300;
   const MEDALS = ["🥇","🥈","🥉"];
+  const SPIN_SYMBOLS = ['🍒','🍋','7️⃣','💎','🍆','⭐','💫','🎲'];
 
   let playerToken = null;
   let playerName = null;
@@ -393,13 +413,13 @@
   let currentBet = 10;
   let currentBalance = 0;
   let spinning = false;
+  let spinIntervals = [];
 
-  // ─── INIT ───
+  // ── INIT ──
   window.addEventListener('load', async () => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
     if (!token) { showExpired(); return; }
-
     try {
       const b64 = token.split(".")[0];
       const bytes = Uint8Array.from(atob(b64.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0));
@@ -410,22 +430,20 @@
       tokenTs = payload.ts;
     } catch(e) { showExpired(); return; }
 
-    // Получаем баланс с сервера
     try {
       const res = await fetch(`${RAILWAY}/casino/balance?token=${encodeURIComponent(playerToken)}`);
       const data = await res.json();
       currentBalance = data.balance;
-    } catch(e) {
-      currentBalance = 1000;
-    }
+    } catch(e) { currentBalance = 1000; }
 
     document.getElementById("loadingScreen").classList.add("hidden");
     document.getElementById("mainApp").classList.remove("hidden");
+    document.getElementById("playerName").textContent = playerName;
     updateBalanceBadge();
     loadLeaderboard();
   });
 
-  // ─── TABS ───
+  // ── TABS ──
   function switchTab(tab) {
     document.getElementById("tabGame").classList.toggle("active", tab==='game');
     document.getElementById("tabLb").classList.toggle("active", tab==='lb');
@@ -434,7 +452,7 @@
     if (tab === 'lb') loadLeaderboard();
   }
 
-  // ─── BET ───
+  // ── BET ──
   function selectBet(amount) {
     currentBet = amount;
     document.querySelectorAll('.bet-btn').forEach(b => {
@@ -442,28 +460,25 @@
     });
   }
 
-  // ─── BALANCE ───
+  // ── BALANCE ──
   function updateBalanceBadge(delta) {
     const badge = document.getElementById("balanceBadge");
-    const fmt = currentBalance >= 0
-      ? `$${currentBalance.toLocaleString('ru')}`
-      : `-$${Math.abs(currentBalance).toLocaleString('ru')}`;
-    badge.textContent = fmt;
+    const abs = Math.abs(currentBalance);
+    badge.textContent = currentBalance >= 0 ? `$${abs.toLocaleString('ru')}` : `-$${abs.toLocaleString('ru')}`;
     badge.className = 'balance-badge';
-    if (delta > 0) badge.classList.add('win');
-    else if (delta < 0) badge.classList.add('lose');
-    if (currentBalance < 0) badge.classList.add('negative');
     if (delta !== undefined) {
+      if (delta > 0) badge.classList.add('win');
+      else if (delta < 0) badge.classList.add('lose');
       setTimeout(() => {
         badge.className = 'balance-badge' + (currentBalance < 0 ? ' negative' : '');
       }, 1200);
     }
+    if (currentBalance < 0) badge.classList.add('negative');
   }
 
-  // ─── SPIN ───
+  // ── SPIN ──
   async function doSpin() {
     if (spinning) return;
-
     const age = Math.floor(Date.now()/1000) - tokenTs;
     if (age >= TOKEN_TTL) {
       showComment("Ссылка истекла. Напиши /casino в чате.", "lose-comment");
@@ -474,27 +489,24 @@
     document.getElementById("spinBtn").disabled = true;
     document.querySelectorAll('.bet-btn').forEach(b => b.disabled = true);
 
-    // Запускаем анимацию
     startSpinAnimation();
 
     try {
       const res = await fetch(`${RAILWAY}/casino/spin`, {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ token: playerToken, bet: currentBet })
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({ token: playerToken, bet: currentBet })
       });
       const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "Ошибка");
 
-      if (!data.ok) throw new Error(data.error || "Ошибка сервера");
-
-      // Ждём минимум 1.5 сек анимации
-      await delay(1500);
-      stopSpinAnimation(data.symbols, data.result_type, data.delta);
+      await delay(1600);
+      stopSpinAnimation(data.symbols, data.delta);
 
       currentBalance = data.new_balance;
       updateBalanceBadge(data.delta);
 
-      await delay(600);
+      await delay(500);
       showComment(data.comment, getCommentClass(data.result_type));
 
       if (data.result_type === 'jackpot' || data.result_type === 'bigwin') {
@@ -502,14 +514,13 @@
       }
 
       loadLeaderboard();
-
     } catch(e) {
-      await delay(1500);
-      stopSpinAnimation(['❌','❌','❌'], 'lose', 0);
+      await delay(1600);
+      stopSpinAnimation(['❌','❌','❌'], -currentBet);
       showComment("Что-то пошло не так. Попробуй ещё раз.", "lose-comment");
     }
 
-    await delay(800);
+    await delay(700);
     spinning = false;
     document.getElementById("spinBtn").disabled = false;
     document.querySelectorAll('.bet-btn').forEach(b => b.disabled = false);
@@ -517,24 +528,20 @@
 
   function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // ─── REEL ANIMATION ───
-  const SPIN_SYMBOLS = ['🍒','🍋','7️⃣','💎','🍆','⭐','💫','🎲'];
-  let spinIntervals = [];
-
+  // ── REEL ANIMATION ──
   function startSpinAnimation() {
     [0,1,2].forEach(i => {
       const reel = document.getElementById(`reel${i}`);
       reel.classList.add('spinning');
       reel.classList.remove('win-flash','lose-flash');
-      const iv = setInterval(() => {
+      spinIntervals[i] = setInterval(() => {
         reel.textContent = SPIN_SYMBOLS[Math.floor(Math.random() * SPIN_SYMBOLS.length)];
-      }, 80);
-      spinIntervals[i] = iv;
+      }, 75);
     });
   }
 
-  function stopSpinAnimation(symbols, resultType, delta) {
-    [0,1,2].forEach((i, idx) => {
+  function stopSpinAnimation(symbols, delta) {
+    [0,1,2].forEach((i) => {
       setTimeout(() => {
         clearInterval(spinIntervals[i]);
         const reel = document.getElementById(`reel${i}`);
@@ -542,13 +549,13 @@
         reel.textContent = symbols[i];
         if (delta > 0) reel.classList.add('win-flash');
         else reel.classList.add('lose-flash');
-      }, idx * 200);
+      }, i * 220);
     });
   }
 
-  function getCommentClass(resultType) {
-    if (resultType === 'jackpot') return 'jackpot-comment';
-    if (resultType === 'bigwin' || resultType === 'win' || resultType === 'pair') return 'win-comment';
+  function getCommentClass(rt) {
+    if (rt === 'jackpot') return 'jackpot-comment';
+    if (rt === 'bigwin' || rt === 'win' || rt === 'pair') return 'win-comment';
     return 'lose-comment';
   }
 
@@ -558,13 +565,12 @@
     box.textContent = text;
   }
 
-  // ─── WIN RAIN ───
+  // ── WIN RAIN ──
   function triggerWinRain(type) {
     const rain = document.getElementById("winRain");
-    rain.innerHTML = '';
-    rain.classList.add('show');
+    rain.innerHTML = ''; rain.classList.add('show');
     const emoji = type === 'jackpot' ? '🍆' : '💎';
-    const count = type === 'jackpot' ? 30 : 15;
+    const count = type === 'jackpot' ? 30 : 14;
     for (let i = 0; i < count; i++) {
       setTimeout(() => {
         const coin = document.createElement('div');
@@ -572,14 +578,14 @@
         coin.textContent = i % 3 === 0 ? '💰' : emoji;
         coin.style.left = Math.random() * 100 + 'vw';
         coin.style.animationDuration = (1 + Math.random() * 1.5) + 's';
-        coin.style.animationDelay = Math.random() * 0.5 + 's';
+        coin.style.animationDelay = Math.random() * 0.4 + 's';
         rain.appendChild(coin);
       }, i * 60);
     }
     setTimeout(() => { rain.classList.remove('show'); rain.innerHTML=''; }, 3500);
   }
 
-  // ─── LEADERBOARD ───
+  // ── LEADERBOARD ──
   async function loadLeaderboard() {
     try {
       const res = await fetch(`${RAILWAY}/casino/leaderboard`);
@@ -602,13 +608,13 @@
       if (i < 3) rank = MEDALS[i];
       else if (i === board.length - 1 && board.length > 3) rank = "💩";
       else rank = `<span style="color:var(--muted);font-size:12px">${i+1}</span>`;
-      const balClass = p.balance >= 0 ? 'positive' : 'negative';
-      const balFmt = p.balance >= 0 ? `$${p.balance.toLocaleString('ru')}` : `-$${Math.abs(p.balance).toLocaleString('ru')}`;
+      const pos = p.balance >= 0;
+      const fmt = pos ? `$${p.balance.toLocaleString('ru')}` : `-$${Math.abs(p.balance).toLocaleString('ru')}`;
       return `
         <div class="lb-row ${isMe?'me':''}">
           <div class="lb-rank">${rank}</div>
           <div class="lb-name ${isMe?'me-label':''}">${esc(p.name)}${isMe?' 👈':''}</div>
-          <div class="lb-balance ${balClass}">${balFmt}</div>
+          <div class="lb-balance ${pos?'positive':'negative'}">${fmt}</div>
         </div>`;
     }).join('');
   }
