@@ -15,9 +15,6 @@
     --accent: #ff4d6d;
     --accent2: #ff8fa3;
     --gold: #ffd60a;
-    --silver: #c0c0c0;
-    --bronze: #cd7f32;
-    --green: #2ecc71;
     --text: #f0f0f5;
     --muted: #6b6b80;
     --radius: 16px;
@@ -26,26 +23,26 @@
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
   html, body {
-    height: 100%;
-    width: 100%;
+    height: 100%; width: 100%;
     overflow: hidden;
     background: var(--bg);
     color: var(--text);
     font-family: 'Onest', sans-serif;
   }
 
-  /* ─── LAYOUT ─── */
   .app {
     height: 100dvh;
     display: flex;
     flex-direction: column;
     padding: clamp(10px, 3vw, 20px);
-    gap: clamp(8px, 2vw, 14px);
+    gap: clamp(8px, 2vw, 12px);
     max-width: 480px;
     margin: 0 auto;
+    animation: fadeIn 0.4s ease;
   }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
 
-  /* ─── HEADER ─── */
+  /* HEADER */
   .header {
     display: flex;
     align-items: center;
@@ -56,7 +53,6 @@
     font-family: 'Unbounded', sans-serif;
     font-size: clamp(14px, 4vw, 20px);
     font-weight: 900;
-    letter-spacing: -0.5px;
     background: linear-gradient(135deg, var(--accent), var(--gold));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -75,24 +71,58 @@
     text-overflow: ellipsis;
   }
 
-  /* ─── RESULT BANNER ─── */
+  /* TABS */
+  .tabs {
+    display: flex;
+    gap: 5px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    padding: 4px;
+  }
+  .tab {
+    flex: 1;
+    padding: clamp(8px, 2vw, 11px);
+    border-radius: 9px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-family: 'Unbounded', sans-serif;
+    font-size: clamp(10px, 2.6vw, 12px);
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.2px;
+  }
+  .tab.active {
+    background: var(--surface2);
+    color: var(--text);
+    box-shadow: 0 1px 8px rgba(0,0,0,0.4);
+  }
+
+  /* PANELS */
+  .panel { display: none; flex: 1; flex-direction: column; min-height: 0; gap: clamp(8px, 2vw, 12px); overflow: hidden; }
+  .panel.active { display: flex; }
+
+  /* RESULT BANNER */
   .result-banner {
     flex-shrink: 0;
     border-radius: var(--radius);
-    padding: clamp(10px, 2.5vw, 14px) clamp(14px, 3vw, 20px);
     text-align: center;
-    font-size: clamp(13px, 3.5vw, 15px);
+    font-size: clamp(12px, 3.2vw, 14px);
     font-weight: 600;
-    opacity: 0;
-    transform: translateY(-8px);
-    transition: all 0.35s cubic-bezier(.34,1.56,.64,1);
-    pointer-events: none;
     line-height: 1.4;
+    max-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: max-height 0.3s ease, opacity 0.3s ease, padding 0.3s ease;
+    padding: 0 clamp(14px, 3vw, 18px);
   }
   .result-banner.show {
+    max-height: 100px;
     opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
+    padding: clamp(10px, 2.5vw, 13px) clamp(14px, 3vw, 18px);
   }
   .result-banner.win {
     background: linear-gradient(135deg, rgba(46,204,113,0.15), rgba(46,204,113,0.05));
@@ -105,29 +135,33 @@
     color: var(--accent);
   }
 
-  /* ─── GRID SECTION ─── */
-  .game-section {
-    flex-shrink: 0;
+  /* GRID */
+  .grid-outer {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(8px, 2vw, 12px);
   }
   .grid-wrap {
+    width: min(100%, 55dvh);
     aspect-ratio: 1;
-    width: 100%;
-    max-width: min(360px, 70dvh);
-    margin: 0 auto;
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: clamp(8px, 2vw, 12px);
+    gap: clamp(7px, 2vw, 11px);
   }
 
   .box {
     aspect-ratio: 1;
-    border-radius: clamp(12px, 3vw, 18px);
+    border-radius: clamp(10px, 3vw, 16px);
     background: var(--surface);
     border: 1.5px solid var(--border);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: clamp(28px, 8vw, 44px);
+    font-size: clamp(26px, 7.5vw, 40px);
     cursor: pointer;
     transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
     position: relative;
@@ -136,31 +170,24 @@
   }
   .box::before {
     content: '';
-    position: absolute;
-    inset: 0;
+    position: absolute; inset: 0;
     background: linear-gradient(135deg, rgba(255,255,255,0.04), transparent);
     border-radius: inherit;
   }
-  .box:hover:not(.done) {
-    transform: scale(1.05);
-    border-color: var(--accent);
-    background: var(--surface2);
-  }
-  .box:active:not(.done) {
-    transform: scale(0.95);
-  }
+  .box:hover:not(.done) { transform: scale(1.05); border-color: var(--accent); background: var(--surface2); }
+  .box:active:not(.done) { transform: scale(0.93); }
   .box.done { cursor: default; }
   .box.winner {
     background: linear-gradient(135deg, rgba(255,214,10,0.2), rgba(255,214,10,0.05));
     border-color: var(--gold);
-    animation: pulse-win 0.6s ease;
+    animation: pulse-win 0.5s ease;
   }
   .box.loser {
     background: linear-gradient(135deg, rgba(255,77,109,0.15), rgba(255,77,109,0.05));
     border-color: var(--accent);
     animation: shake 0.4s ease;
   }
-  .box.neutral.done { opacity: 0.35; }
+  .box.neutral.done { opacity: 0.28; }
 
   @keyframes pulse-win {
     0% { transform: scale(1); }
@@ -169,35 +196,54 @@
     100% { transform: scale(1); }
   }
   @keyframes shake {
-    0%, 100% { transform: translateX(0); }
+    0%,100% { transform: translateX(0); }
     20% { transform: translateX(-6px); }
     60% { transform: translateX(6px); }
   }
 
-  /* ─── PLAY AGAIN ─── */
+  /* PLAY AGAIN */
   .play-again {
-    display: none;
-    width: 100%;
-    max-width: min(360px, 70dvh);
-    margin: 0 auto;
-    margin-top: clamp(8px, 2vw, 12px);
-    padding: clamp(12px, 3vw, 16px);
+    width: min(100%, 55dvh);
+    padding: clamp(11px, 2.5vw, 15px);
     border-radius: var(--radius);
     background: linear-gradient(135deg, var(--accent), #c9184a);
     border: none;
     color: #fff;
     font-family: 'Unbounded', sans-serif;
-    font-size: clamp(13px, 3.5vw, 15px);
+    font-size: clamp(12px, 3vw, 14px);
     font-weight: 700;
     cursor: pointer;
-    transition: transform 0.15s ease, opacity 0.15s ease;
-    letter-spacing: 0.3px;
+    transition: opacity 0.15s, transform 0.15s;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
   }
-  .play-again:hover { opacity: 0.9; transform: scale(1.02); }
+  .play-again.show {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+    transition: all 0.3s cubic-bezier(.34,1.56,.64,1);
+  }
+  .play-again:hover { opacity: 0.88; }
   .play-again:active { transform: scale(0.97); }
-  .play-again.show { display: block; }
 
-  /* ─── LEADERBOARD ─── */
+  /* TOKEN EXPIRED NOTICE */
+  .expired-notice {
+    width: min(100%, 55dvh);
+    background: linear-gradient(135deg, rgba(255,214,10,0.1), rgba(255,214,10,0.03));
+    border: 1px solid rgba(255,214,10,0.3);
+    border-radius: var(--radius);
+    padding: clamp(10px, 2.5vw, 13px) clamp(14px, 3vw, 18px);
+    text-align: center;
+    font-size: clamp(12px, 3vw, 14px);
+    color: var(--gold);
+    font-weight: 600;
+    display: none;
+    line-height: 1.5;
+  }
+  .expired-notice.show { display: block; }
+
+  /* LEADERBOARD PANEL */
   .leaderboard {
     flex: 1;
     min-height: 0;
@@ -226,13 +272,12 @@
     scrollbar-width: none;
   }
   .lb-list::-webkit-scrollbar { display: none; }
-
   .lb-row {
     display: grid;
     grid-template-columns: 28px 1fr auto;
     align-items: center;
     gap: 10px;
-    padding: clamp(7px, 2vw, 10px) clamp(8px, 2vw, 12px);
+    padding: clamp(7px, 1.8vw, 10px) clamp(8px, 2vw, 12px);
     border-radius: 10px;
     transition: background 0.15s;
   }
@@ -241,7 +286,6 @@
     background: linear-gradient(135deg, rgba(255,77,109,0.1), rgba(255,77,109,0.03));
     border: 1px solid rgba(255,77,109,0.2);
   }
-
   .lb-rank {
     font-family: 'Unbounded', sans-serif;
     font-size: clamp(11px, 2.8vw, 13px);
@@ -263,48 +307,14 @@
     text-align: right;
     white-space: nowrap;
   }
-  .lb-pct {
-    font-size: clamp(10px, 2.5vw, 11px);
-    color: var(--muted);
-    margin-left: 4px;
-  }
+  .lb-pct { font-size: clamp(10px, 2.5vw, 11px); color: var(--muted); margin-left: 4px; }
+  .lb-empty { text-align: center; color: var(--muted); padding: 24px; font-size: 13px; }
 
-  .lb-empty {
-    text-align: center;
-    color: var(--muted);
-    padding: 20px;
-    font-size: 13px;
-  }
-
-  /* ─── EXPIRED ─── */
-  .expired-screen {
-    display: none;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100dvh;
-    text-align: center;
-    padding: 30px;
-    gap: 16px;
-  }
-  .expired-screen.show { display: flex; }
-  .expired-emoji { font-size: 64px; }
-  .expired-title {
-    font-family: 'Unbounded', sans-serif;
-    font-size: 22px;
-    font-weight: 900;
-    color: var(--accent);
-  }
-  .expired-sub { color: var(--muted); font-size: 15px; line-height: 1.5; }
-
-  /* ─── LOADING ─── */
-  .loading-screen {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100dvh;
-    gap: 14px;
+  /* SCREENS */
+  .loading-screen, .expired-screen {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 100dvh; text-align: center; padding: 30px; gap: 16px;
   }
   .spinner {
     width: 36px; height: 36px;
@@ -315,50 +325,58 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .loading-text { color: var(--muted); font-size: 14px; }
+  .expired-emoji { font-size: 60px; }
+  .expired-title {
+    font-family: 'Unbounded', sans-serif;
+    font-size: 20px; font-weight: 900; color: var(--accent);
+  }
+  .expired-sub { color: var(--muted); font-size: 14px; line-height: 1.6; }
 
-  /* ─── ANIMATIONS ─── */
-  .app { animation: fadeIn 0.4s ease; }
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 
-<!-- LOADING -->
 <div class="loading-screen" id="loadingScreen">
   <div class="spinner"></div>
   <div class="loading-text">Загружаем игру...</div>
 </div>
 
-<!-- EXPIRED TOKEN -->
-<div class="expired-screen" id="expiredScreen">
+<div class="expired-screen hidden" id="expiredScreen">
   <div class="expired-emoji">⏱️</div>
   <div class="expired-title">Ссылка устарела</div>
-  <div class="expired-sub">Напиши /game в чате<br>и получи новую ссылку</div>
+  <div class="expired-sub">Напиши /game в чате<br>и получи свежую ссылку</div>
 </div>
 
-<!-- MAIN APP -->
-<div class="app" id="mainApp" style="display:none;">
+<div class="app hidden" id="mainApp">
 
-  <!-- Header -->
   <div class="header">
     <div class="logo">🍆 Найди писюн</div>
     <div class="player-badge" id="playerBadge">—</div>
   </div>
 
-  <!-- Result -->
-  <div class="result-banner" id="resultBanner"></div>
-
-  <!-- Grid -->
-  <div class="game-section">
-    <div class="grid-wrap" id="grid"></div>
-    <button class="play-again" id="playAgainBtn" onclick="resetGame()">Сыграть ещё раз → /game</button>
+  <div class="tabs">
+    <button class="tab active" id="tabGame" onclick="switchTab('game')">🎮 Игра</button>
+    <button class="tab" id="tabLb" onclick="switchTab('lb')">🏆 Таблица лидеров</button>
   </div>
 
-  <!-- Leaderboard -->
-  <div class="leaderboard">
-    <div class="lb-header">🏆 Таблица лидеров</div>
-    <div class="lb-list" id="lbList">
-      <div class="lb-empty">Загружаем рейтинг...</div>
+  <!-- GAME PANEL -->
+  <div class="panel active" id="panelGame">
+    <div class="result-banner" id="resultBanner"></div>
+    <div class="grid-outer">
+      <div class="grid-wrap" id="grid"></div>
+      <button class="play-again" id="playAgainBtn" onclick="playAgain()">🔄 Сыграть ещё раз</button>
+      <div class="expired-notice" id="expiredNotice">⏱️ Ссылка истекла — напиши /game в чате для новой</div>
+    </div>
+  </div>
+
+  <!-- LEADERBOARD PANEL -->
+  <div class="panel" id="panelLb">
+    <div class="leaderboard">
+      <div class="lb-header">🏆 Таблица лидеров</div>
+      <div class="lb-list" id="lbList">
+        <div class="lb-empty">Загружаем рейтинг...</div>
+      </div>
     </div>
   </div>
 
@@ -367,44 +385,53 @@
 <script>
   const RAILWAY_URL = "https://summarybot-production-0954.up.railway.app";
   const MEDALS = ["🥇","🥈","🥉"];
-  const POOP = "💩";
 
   let playerName = null;
   let playerToken = null;
+  let tokenTs = 0;
   let gameOver = false;
   let winnerPos = null;
+  const TOKEN_TTL = 300;
 
   // ─── INIT ───
   window.addEventListener('load', async () => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
 
-    if (!token) {
-      showExpired();
-      return;
-    }
+    if (!token) { showExpiredScreen(); return; }
 
-    // Декодируем payload (без проверки — проверка на сервере)
     try {
       const b64 = token.split(".")[0];
-      const payload = JSON.parse(atob(b64.replace(/-/g,'+').replace(/_/g,'/')));
+      // Правильное декодирование UTF-8 из base64
+      const bytes = Uint8Array.from(
+        atob(b64.replace(/-/g, '+').replace(/_/g, '/')),
+        c => c.charCodeAt(0)
+      );
+      const payload = JSON.parse(new TextDecoder('utf-8').decode(bytes));
       const age = Math.floor(Date.now() / 1000) - payload.ts;
-      if (age > 300) { showExpired(); return; }
+      if (age > TOKEN_TTL) { showExpiredScreen(); return; }
       playerName = payload.user_name;
       playerToken = token;
+      tokenTs = payload.ts;
     } catch(e) {
-      showExpired();
-      return;
+      showExpiredScreen(); return;
     }
 
-    // Показываем приложение
-    document.getElementById("loadingScreen").style.display = "none";
-    document.getElementById("mainApp").style.display = "flex";
+    document.getElementById("loadingScreen").classList.add("hidden");
+    document.getElementById("mainApp").classList.remove("hidden");
     document.getElementById("playerBadge").textContent = playerName;
 
     buildGrid();
-    await loadScores();
+    loadScores();
   });
+
+  // ─── TABS ───
+  function switchTab(tab) {
+    document.getElementById("tabGame").classList.toggle("active", tab === 'game');
+    document.getElementById("tabLb").classList.toggle("active", tab === 'lb');
+    document.getElementById("panelGame").classList.toggle("active", tab === 'game');
+    document.getElementById("panelLb").classList.toggle("active", tab === 'lb');
+  }
 
   // ─── BUILD GRID ───
   function buildGrid() {
@@ -412,12 +439,10 @@
     winnerPos = Math.floor(Math.random() * 9);
     const grid = document.getElementById("grid");
     grid.innerHTML = "";
-
     for (let i = 0; i < 9; i++) {
       const box = document.createElement("div");
       box.className = "box";
       box.textContent = "📦";
-      box.dataset.index = i;
       box.addEventListener("click", () => handleClick(i));
       grid.appendChild(box);
     }
@@ -430,24 +455,23 @@
 
     const won = chosen === winnerPos;
     const boxes = document.querySelectorAll(".box");
-
     boxes.forEach((box, i) => {
       box.classList.add("done");
-      if (i === winnerPos) {
-        box.textContent = "🍆";
-        box.classList.add("winner");
-      } else if (i === chosen && !won) {
-        box.textContent = "💨";
-        box.classList.add("loser");
-      } else {
-        box.classList.add("neutral");
-      }
+      if (i === winnerPos) { box.textContent = "🍆"; box.classList.add("winner"); }
+      else if (i === chosen && !won) { box.textContent = "💨"; box.classList.add("loser"); }
+      else { box.classList.add("neutral"); }
     });
 
     showResult(won, chosen);
-    document.getElementById("playAgainBtn").classList.add("show");
 
-    // Отправляем результат на сервер
+    // Проверяем не истёк ли токен
+    const age = Math.floor(Date.now() / 1000) - tokenTs;
+    if (age < TOKEN_TTL) {
+      document.getElementById("playAgainBtn").classList.add("show");
+    } else {
+      document.getElementById("expiredNotice").classList.add("show");
+    }
+
     try {
       await fetch(`${RAILWAY_URL}/result`, {
         method: "POST",
@@ -456,37 +480,48 @@
       });
       await loadScores();
     } catch(e) {
-      console.error("Ошибка отправки результата:", e);
+      console.error("Ошибка отправки:", e);
     }
   }
 
-  // ─── RESULT BANNER ───
-  const WIN_TEXTS = [
-    "Нашёл! Везёт тебе 🍆",
-    "Красавчик, нашёл с первого раза!",
-    "Та-дааам! Писюн найден 🎉",
-    "Ловкие руки — не пропьёшь 🏆",
-  ];
-  const LOSE_TEXTS = [
-    "Мимо! Писюн был в другом месте 💨",
-    "Промазал. Бывает, не расстраивайся",
-    "Ха! Не угадал. Попробуй ещё раз",
-    "Руки не из того места? Давай ещё раз 💩",
-  ];
-
+  // ─── TAUNTS (оригинальные фразы) ───
   function showResult(won, chosen) {
+    const n = playerName;
+    const box = winnerPos + 1;
+
+    const winTexts = [
+      `🍆 ${n} нашёл! Ну и что, теперь что с ним делать будешь?`,
+      `🎉 ${n} везунчик, нашёл писюн. Маме расскажи.`,
+      `🍆 ${n} нашёл писюн. Видимо не первый раз ищет.`,
+      `🎉 Ну надо же, ${n} справился. Запиши в резюме.`,
+    ];
+    const loseTexts = [
+      `💨 ${n}, ну ты лох. Писюн был в коробке ${box}, а ты куда полез?`,
+      `🗑 ${n} не нашёл. Руки из жопы, коробка ${box} же была очевидна.`,
+      `💨 ${n} промазал мимо писюна. Это талант — коробка ${box} прямо смотрела на тебя.`,
+      `🤡 ${n}, серьёзно? Писюн в коробке ${box} сидел и ждал, а ты мимо.`,
+    ];
+
+    const texts = won ? winTexts : loseTexts;
+    const text = texts[Math.floor(Math.random() * texts.length)];
     const banner = document.getElementById("resultBanner");
     banner.className = `result-banner ${won ? 'win' : 'lose'} show`;
-    const texts = won ? WIN_TEXTS : LOSE_TEXTS;
-    banner.textContent = texts[Math.floor(Math.random() * texts.length)];
+    banner.textContent = text;
   }
 
-  // ─── RESET ───
-  function resetGame() {
+  // ─── PLAY AGAIN ───
+  function playAgain() {
+    const age = Math.floor(Date.now() / 1000) - tokenTs;
+    if (age >= TOKEN_TTL) {
+      document.getElementById("playAgainBtn").classList.remove("show");
+      document.getElementById("expiredNotice").classList.add("show");
+      return;
+    }
+    // Сбрасываем UI
     const banner = document.getElementById("resultBanner");
     banner.className = "result-banner";
     document.getElementById("playAgainBtn").classList.remove("show");
-    // Кнопка просто напоминает написать /game — игра уже привязана к токену
+    buildGrid();
   }
 
   // ─── SCORES ───
@@ -507,33 +542,30 @@
       list.innerHTML = '<div class="lb-empty">Ещё никто не играл 👀</div>';
       return;
     }
-
     list.innerHTML = scores.map((s, i) => {
       const total = s.wins + s.losses;
       const pct = total ? Math.round((s.wins / total) * 100) : 0;
       const isMe = s.name === playerName;
-
       let rank;
       if (i < 3) rank = MEDALS[i];
-      else if (i === scores.length - 1 && scores.length > 3) rank = POOP;
+      else if (i === scores.length - 1 && scores.length > 3) rank = "💩";
       else rank = `<span style="color:var(--muted);font-size:12px">${i+1}</span>`;
-
       return `
         <div class="lb-row ${isMe ? 'me' : ''}">
           <div class="lb-rank">${rank}</div>
-          <div class="lb-name ${isMe ? 'me-label' : ''}">${escHtml(s.name)}${isMe ? ' 👈' : ''}</div>
+          <div class="lb-name ${isMe ? 'me-label' : ''}">${esc(s.name)}${isMe ? ' 👈' : ''}</div>
           <div class="lb-stats">${s.wins}🍆 ${s.losses}💨<span class="lb-pct">${pct}%</span></div>
         </div>`;
     }).join('');
   }
 
-  function escHtml(str) {
-    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  function showExpired() {
-    document.getElementById("loadingScreen").style.display = "none";
-    document.getElementById("expiredScreen").classList.add("show");
+  function showExpiredScreen() {
+    document.getElementById("loadingScreen").classList.add("hidden");
+    document.getElementById("expiredScreen").classList.remove("hidden");
   }
 </script>
 </body>
