@@ -152,6 +152,29 @@ def get_last_messages(chat_id: int, limit: int = 10) -> list:
     finally:
         release_conn(conn)
 
+def get_messages_around_timestamp(chat_id: int, anchor_ts, before: int = 15, after: int = 8) -> list:
+    """Берём сообщения вокруг конкретного timestamp — якоря из reply"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                (SELECT user_name, message_text, timestamp
+                 FROM history
+                 WHERE chat_id = %s AND timestamp <= %s
+                 ORDER BY timestamp DESC
+                 LIMIT %s)
+                UNION ALL
+                (SELECT user_name, message_text, timestamp
+                 FROM history
+                 WHERE chat_id = %s AND timestamp > %s
+                 ORDER BY timestamp ASC
+                 LIMIT %s)
+                ORDER BY timestamp ASC
+            ''', (chat_id, anchor_ts, before, chat_id, anchor_ts, after))
+            return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
 def cleanup_old_messages():
     conn = get_conn()
     try:
@@ -264,18 +287,18 @@ SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
 def spin_slots(bet: int) -> dict:
     """
-    Новые вероятности — казино жёстче:
+    Вероятности — казино жёстче:
       75%  — все разные (проигрыш, x0)
-      15%  — два одинаковых (x1.2) — едва отбиваешь
+      15%  — два одинаковых (x1.2)
        6%  — 🍒🍒🍒 (x2.5)
       2.5% — 🍋🍋🍋 (x4)
        1%  — 7️⃣7️⃣7️⃣ (x12)
       0.4% — 💎💎💎 (x8)
       0.1% — 🍆🍆🍆 (x20, джекпот)
-    Матожидание ~0.65$ на каждый вложенный доллар. Казино забирает 35%.
+    Матожидание ~0.65$ на каждый вложенный доллар.
     """
     r = random.random()
- 
+
     if r < 0.75:
         symbols = random.sample(SLOT_SYMBOLS, 3)
         multiplier = 0
@@ -313,7 +336,7 @@ def spin_slots(bet: int) -> dict:
         symbols = ['🍆', '🍆', '🍆']
         multiplier = 20
         result_type = "jackpot"
- 
+
     winnings = int(bet * multiplier)
     delta = winnings - bet
     return {
@@ -325,22 +348,18 @@ def spin_slots(bet: int) -> dict:
     }
 
 def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int) -> str:
-    """Стебные комментарии в стиле Бати, с матом, по ситуации"""
-
     if result_type == "jackpot":
         return random.choice([
             f"ДЖЕКПОТ, СУКА!!! {name}, ты выиграл всё что можно было выиграть в этой помойке! Звони маме, пиши в резюме. Но мы оба знаем — ты это всё просрёшь обратно. Крути дальше.",
             f"🍆🍆🍆 ТРИ ПИСЮНА! {name}, это знак судьбы. Либо немедленно уходи победителем, либо оставайся и проиграй всё. Мы угадали что ты выберешь.",
             f"СТОП. {name} сорвал джекпот. Казино официально в панике. Наслаждайся моментом — он не повторится никогда в жизни.",
         ])
-
     if result_type == "bigwin":
         return random.choice([
             f"ЕБАТЬ ТЫ ФОРТОВЫЙ, {name}! Скорее депай ещё пока колесо фортуны не заметило свою ошибку. Такое везение случается раз в жизни — и ты уже потратил свой шанс.",
             f"Ничего себе, {name}! Большой куш! Самое время остановиться... но ты же не остановишься, да? Мы знаем тебя.",
             f"{name} поднял серьёзные бабки. Казино смотрит на тебя с уважением и ненавистью одновременно. Крути ещё — нам нужно вернуть своё.",
         ])
-
     if result_type == "win":
         return random.choice([
             f"О, {name} выиграл! Скорее депай ещё пока везёт, идиот. Удача — она как кошка: погладил раз, укусит два.",
@@ -348,36 +367,30 @@ def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int
             f"{name}, поздравляю с маленькой победой в большой войне с казино. Спойлер: казино выиграет войну.",
             f"Повезло {name}! Теперь ставь больше — раз пошла такая пьянка. Логика железная, да?",
         ])
-
     if result_type == "pair":
         return random.choice([
-            f"Пара у {name}. Х1.5, красавчик. Это не выигрыш, это подачка. Казино кормит тебя с ладони как голубя.",
+            f"Пара у {name}. Х1.2, красавчик. Это не выигрыш, это подачка. Казино кормит тебя с ладони как голубя.",
             f"{name}, пара — это казино говорит тебе 'иди сюда, хороший'. Не ведись. Хотя ты уже ведёшься.",
             f"Маленький плюсик для {name}. Аппарат прогревается. Следующий спин будет либо джекпот либо дно — угадай что вероятнее.",
         ])
-
-    # Проигрыш — градация по балансу
     if new_balance >= 1000:
         return random.choice([
             f"Мимо, {name}. Бывает. Ты ещё в плюсе — есть что терять. Это самое опасное состояние для лудомана.",
             f"{name} слил ставку. Деньги ещё есть, значит казино своё ещё получит. Крути дальше.",
             f"Ай, {name}, не повезло. Зато ты богатый пока. Ключевое слово — пока.",
         ])
-
     elif new_balance >= 500:
         return random.choice([
             f"Хм, {name}... Денежки тают. Чуешь этот запах? Это твои сбережения горят. Красиво горят, надо признать.",
             f"{name}, осторожно — пахнет лудкой. Ты ещё не закрыл вкладку? Конечно нет. Понятно.",
             f"Баланс падает, {name}. Это нормально, говоришь себе. Всего одна удачная ставка и отыграюсь. Классика жанра.",
         ])
-
     elif new_balance >= 0:
         return random.choice([
             f"Почка ещё на месте, {name}? Проверь — скоро пригодится. Ты почти на нуле, дружище.",
             f"{name}, ты в опасной близости от дна. Большинство людей на этом месте остановились бы. Но ты же не большинство.",
             f"Осталось совсем чуть-чуть, {name}. Либо сейчас повезёт и отыграешься, либо... ну ты понимаешь. Крути.",
         ])
-
     elif new_balance >= -1000:
         return random.choice([
             f"ПОЗДРАВЛЯЮ, {name}! Ты официально в минусе! Почку уже оценил? На рынке сейчас неплохие цены.",
@@ -385,7 +398,6 @@ def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int
             f"Минус на балансе у {name}. Машину продавать ещё рано, но держи документы наготове.",
             f"О, {name} в красной зоне! Звони другу, занимай бабки — казино ждёт. Долг — не проблема, проблема — не отыграться.",
         ])
-
     elif new_balance >= -5000:
         return random.choice([
             f"{name}, ты уже серьёзно в яме. Хату заложил? Машину продал? Нет? Значит ещё есть что терять. Крути.",
@@ -393,7 +405,6 @@ def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int
             f"СТОП, {name}. Нет, серьёзно, стоп. Подумай. Подумал? Хорошо. А теперь крути — думать вредно для азарта.",
             f"{name} зарылся как крот. На этой глубине уже темно и страшно. Но джекпот где-то здесь, правда же? Правда?",
         ])
-
     else:
         return random.choice([
             f"ЛЕГЕНДА. {name} установил антирекорд казино. Это надо уметь. Напиши завещание и крути дальше — нам нужен новый рекорд.",
@@ -557,7 +568,7 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
             raise
     raise Exception("Все модели исчерпали лимит. Попробуй позже.")
 
-# 9. ДАЯНА
+# 9. ДАЯНА — ОТВЕТ НА ВОПРОС
 def ask_dayana(question: str) -> str:
     prompt = f"""
 Ты — Даяна. Не ассистент, не бот, не помощник. Даяна.
@@ -583,56 +594,95 @@ def ask_dayana(question: str) -> str:
     )
     return completion.choices[0].message.content
 
-def dayana_judge(context: str) -> str:
+# 10. ДАЯНА — РАССУДИТЬ СПОР (умный промпт + qwen3)
+def dayana_judge(context: str, hint: str = None) -> str:
+    hint_block = f"\nЧТО ИМЕННО НУЖНО РАССУДИТЬ (подсказка от участника):\n{hint}\n" if hint else ""
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами, острым языком и абсолютным чувством справедливости.
-Тебя попросили рассудить спор или ситуацию в чате.
+Тебя попросили рассудить спор в чате.
 
-КАК ГОВОРИШЬ:
-- Начни ответ с короткого атмосферного действия в asterisk.
+ШАГ 1 — РАЗБЕРИСЬ САМА (не пиши это вслух, просто подумай):
+- Кто участвует в споре? Назови имена.
+- В чём именно суть разногласия — одним предложением.
+- Кто первым начал и кто эскалировал?
+- Есть ли в переписке посторонние сообщения не по теме спора? Игнорируй их.
+- У кого из сторон более весомые аргументы?
+
+ШАГ 2 — ВЫНЕСИ ВЕРДИКТ (это и пиши):
+- Начни с короткого атмосферного действия в asterisk. Каждый раз разное.
 - Формат: *[действие]* — и дальше сразу текст.
 - Пример: *закуривает сигарету Kiss, смотрит в окно* — Так, разберёмся...
-- Выносишь чёткий вердикт. Никаких "с одной стороны". Ты говоришь прямо.
-- Коротко и по делу. Максимум 5-6 предложений.
+- Назови стороны по имени — не "один участник" а конкретно кто.
+- Чёткий вердикт: кто прав, кто нет, почему. Никаких "с одной стороны".
+- Можешь поддеть того кто неправ — но справедливо.
+- Если все неправы — скажи прямо и объясни почему оба идиоты.
+- Максимум 5-6 предложений. Коротко и жёстко.
 - Отвечаешь на русском языке.
-
-ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:
+{hint_block}
+ПЕРЕПИСКА ИЗ ЧАТА:
 {context}
 
 Вынеси вердикт.
 """
-    completion = client_dayana.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.8, max_tokens=500,
-    )
-    return completion.choices[0].message.content
+    for model in ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]:
+        try:
+            completion = client_dayana.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=600,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "model" in str(e).lower():
+                print(f"Даяна рассуди: модель {model} недоступна, переключаюсь...")
+                continue
+            raise
+    raise Exception("Все модели недоступны")
 
-def dayana_guilty(context: str) -> str:
+# 11. ДАЯНА — КТО ВИНОВАТ (умный промпт + qwen3)
+def dayana_guilty(context: str, hint: str = None) -> str:
+    hint_block = f"\nПОДСКАЗКА О СИТУАЦИИ:\n{hint}\n" if hint else ""
     prompt = f"""
-Ты — Даяна. Секретарша с холодной головой и острым взглядом.
-Тебя попросили назначить виноватого в последних событиях чата.
+Ты — Даяна. Секретарша с холодной головой, острым взглядом и нулевой терпимостью к отмазкам.
+Тебя попросили найти виноватого.
 
-КАК ГОВОРИШЬ:
-- Читаешь контекст и чётко называешь кто виноват и почему.
-- Никаких отмазок — конкретное имя и конкретная причина.
-- Можешь быть саркастичной — но справедливой.
-- Коротко: назначила виноватого, объяснила почему, точка.
+ШАГ 1 — ПРОАНАЛИЗИРУЙ (не пиши, просто подумай):
+- Что произошло? Восстанови хронологию.
+- Кто что сделал или сказал — конкретно.
+- Игнорируй сообщения не по теме — в чате всегда есть посторонний шум.
+- Кто объективно облажался или спровоцировал?
+
+ШАГ 2 — НАЗНАЧЬ ВИНОВАТОГО (это и пиши):
+- Конкретное имя. Не "некоторые участники" — а кто именно.
+- Чёткая причина: что именно он сделал не так.
+- Можешь быть саркастичной — но справедливой, не злобной.
+- Если вина распределена — назови главного виноватого и объясни градацию.
+- Коротко: 3-4 предложения максимум.
 - Отвечаешь на русском языке.
-
-ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:
+{hint_block}
+ПЕРЕПИСКА ИЗ ЧАТА:
 {context}
 
 Назначь виноватого.
 """
-    completion = client_dayana.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.8, max_tokens=400,
-    )
-    return completion.choices[0].message.content
+    for model in ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]:
+        try:
+            completion = client_dayana.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=500,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "model" in str(e).lower():
+                print(f"Даяна виноват: модель {model} недоступна, переключаюсь...")
+                continue
+            raise
+    raise Exception("Все модели недоступны")
 
-# 10. УТИЛИТЫ
+# 12. УТИЛИТЫ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
@@ -652,7 +702,7 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 11. ТОКЕНЫ
+# 13. ТОКЕНЫ
 def generate_game_token(user_id: int, user_name: str) -> str:
     payload = {"user_id": user_id, "user_name": user_name, "ts": int(time.time())}
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
@@ -672,7 +722,7 @@ def verify_game_token(token: str) -> dict | None:
     except Exception:
         return None
 
-# 12. ВЕБ — CORS
+# 14. ВЕБ — CORS
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
@@ -684,7 +734,7 @@ async def cors_middleware(request, handler):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
-# 13. ВЕБ — ЭНДПОИНТЫ ИГРЫ В ПИСЮН
+# 15. ВЕБ — ЭНДПОИНТЫ
 async def handle_result(request):
     try:
         data = await request.json()
@@ -707,40 +757,27 @@ async def handle_scores(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-# 14. ВЕБ — ЭНДПОИНТЫ КАЗИНО
 async def handle_casino_spin(request):
     try:
         data = await request.json()
         payload = verify_game_token(data.get("token", ""))
         if not payload:
             return web.json_response({"error": "Unauthorized"}, status=401)
-
         bet = int(data.get("bet", 10))
         if bet not in [10, 50, 100, 500]:
             return web.json_response({"error": "Invalid bet"}, status=400)
-
         user_id = int(payload["user_id"])
         user_name = payload["user_name"]
-
-        # Убедимся что игрок есть в БД
         get_or_create_casino_balance(ALLOWED_CHAT_ID, user_id, user_name)
-
-        # Крутим барабаны
         result = spin_slots(bet)
-        delta = result["delta"]
-
-        # Обновляем баланс
-        new_balance = update_casino_balance(ALLOWED_CHAT_ID, user_id, delta)
-
-        # Генерируем комментарий
-        comment = get_casino_comment(user_name, result["result_type"], delta, new_balance)
-
+        new_balance = update_casino_balance(ALLOWED_CHAT_ID, user_id, result["delta"])
+        comment = get_casino_comment(user_name, result["result_type"], result["delta"], new_balance)
         return web.json_response({
             "ok": True,
             "symbols": result["symbols"],
             "multiplier": result["multiplier"],
             "winnings": result["winnings"],
-            "delta": delta,
+            "delta": result["delta"],
             "result_type": result["result_type"],
             "new_balance": new_balance,
             "comment": comment,
@@ -770,7 +807,7 @@ async def handle_casino_balance(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-# 15. КОМАНДЫ БОТА
+# 16. КОМАНДЫ БОТА
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -792,7 +829,10 @@ async def cmd_help(message: types.Message):
         "🎰 /casino — слоты (стартовые $1000)\n\n"
         "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
         "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
-        "👉 <b>Даяна кто виноват</b> — назначить виноватого"
+        "   └ ответь на сообщение из спора для точного контекста\n"
+        "   └ или: Даяна рассуди [суть спора]\n"
+        "👉 <b>Даяна кто виноват</b> — назначить виноватого\n"
+        "   └ ответь на сообщение или добавь подсказку"
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -937,7 +977,7 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 16. СБОР СООБЩЕНИЙ
+# 17. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
@@ -950,8 +990,11 @@ async def collect_messages(message: types.Message):
         author = message.from_user.full_name or message.from_user.username or "Аноним"
     else:
         return
+
     if message.text:
         text_lower = message.text.lower()
+
+        # ── Даяна ответь ──
         if "даяна" in text_lower and "ответь" in text_lower:
             try:
                 idx = text_lower.index("ответь") + len("ответь")
@@ -964,32 +1007,65 @@ async def collect_messages(message: types.Message):
                 safe_answer = answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
             except Exception as e:
+                print(f"Ошибка Даяны (ответь): {e}")
                 await message.reply("Не могу ответить прямо сейчас.")
             return
+
+        # ── Даяна рассуди ──
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
-                rows = get_last_messages(message.chat.id, limit=40)
+                # Подсказка — текст после "рассуди"
+                idx = text_lower.index("рассуди") + len("рассуди")
+                hint = message.text[idx:].strip() or None
+
+                # Если ответили на конкретное сообщение — берём контекст вокруг него
+                if message.reply_to_message and message.reply_to_message.date:
+                    anchor_ts = message.reply_to_message.date
+                    rows = get_messages_around_timestamp(message.chat.id, anchor_ts, before=15, after=8)
+                    context_note = "📌 Контекст вокруг указанного сообщения"
+                else:
+                    rows = get_last_messages(message.chat.id, limit=25)
+                    context_note = "📋 Последние сообщения чата"
+
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
-                verdict = dayana_judge(format_context(rows))
+
+                verdict = dayana_judge(format_context(rows), hint)
                 safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>⚖️ Даяна:</b>\n\n{safe_verdict}", parse_mode="HTML")
-            except Exception:
+            except Exception as e:
+                print(f"Ошибка Даяны (рассуди): {e}")
                 await message.reply("Не могу рассудить прямо сейчас.")
             return
+
+        # ── Даяна кто виноват ──
         if "даяна" in text_lower and "виноват" in text_lower:
             try:
-                rows = get_last_messages(message.chat.id, limit=10)
+                # Подсказка — текст после "виноват"
+                idx = text_lower.index("виноват") + len("виноват")
+                hint = message.text[idx:].strip() or None
+
+                # Если ответили на конкретное сообщение — берём контекст вокруг него
+                if message.reply_to_message and message.reply_to_message.date:
+                    anchor_ts = message.reply_to_message.date
+                    rows = get_messages_around_timestamp(message.chat.id, anchor_ts, before=12, after=6)
+                else:
+                    rows = get_last_messages(message.chat.id, limit=20)
+
                 if not rows:
                     await message.reply("Не в чем разбираться — чат пустой.")
                     return
-                guilty = dayana_guilty(format_context(rows))
+
+                guilty = dayana_guilty(format_context(rows), hint)
                 safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>👉 Даяна:</b>\n\n{safe_guilty}", parse_mode="HTML")
-            except Exception:
+            except Exception as e:
+                print(f"Ошибка Даяны (виноват): {e}")
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
+
+    # Сохраняем сообщения
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
