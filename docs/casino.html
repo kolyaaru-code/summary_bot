@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Казино</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;700;900&family=Onest:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --surface: #13131a;
+    --surface2: #1a1a24;
+    --border: #252535;
+    --gold: #ffd700;
+    --gold2: #ffaa00;
+    --green: #00e676;
+    --red: #ff1744;
+    --text: #f0f0f8;
+    --muted: #5a5a78;
+    --radius: 16px;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+
+  html, body {
+    height:100%; width:100%;
+    overflow:hidden;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Onest',sans-serif;
+  }
+
+  /* Фоновые огни */
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background:
+      radial-gradient(ellipse 60% 40% at 50% 0%, rgba(255,215,0,0.06) 0%, transparent 70%),
+      radial-gradient(ellipse 40% 30% at 80% 80%, rgba(255,0,80,0.05) 0%, transparent 60%);
+    pointer-events:none;
+  }
+
+  .app {
+    height:100dvh;
+    display:flex;
+    flex-direction:column;
+    padding:clamp(8px,2.5vw,16px);
+    gap:clamp(6px,1.8vw,10px);
+    max-width:440px;
+    margin:0 auto;
+    animation:fadeIn 0.4s ease;
+    position:relative;
+  }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+
+  /* HEADER */
+  .header {
+    display:flex; align-items:center; justify-content:space-between;
+    flex-shrink:0;
+  }
+  .logo {
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(14px,4vw,19px);
+    font-weight:900;
+    background:linear-gradient(135deg,var(--gold),var(--gold2),#fff8dc);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+    letter-spacing:-0.5px;
+  }
+  .balance-badge {
+    background:var(--surface2);
+    border:1.5px solid var(--gold);
+    border-radius:30px;
+    padding:6px 14px;
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(11px,3vw,13px);
+    font-weight:700;
+    color:var(--gold);
+    white-space:nowrap;
+    transition:all 0.4s ease;
+  }
+  .balance-badge.win { color:var(--green); border-color:var(--green); }
+  .balance-badge.lose { color:var(--red); border-color:var(--red); }
+  .balance-badge.negative { color:var(--red); border-color:var(--red); }
+
+  /* TABS */
+  .tabs {
+    display:flex; gap:5px; flex-shrink:0;
+    background:var(--surface);
+    border:1.5px solid var(--border);
+    border-radius:12px; padding:4px;
+  }
+  .tab {
+    flex:1; padding:clamp(7px,2vw,10px);
+    border-radius:9px; border:none;
+    background:transparent; color:var(--muted);
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(10px,2.5vw,12px); font-weight:700;
+    cursor:pointer; transition:all 0.2s ease;
+  }
+  .tab.active { background:var(--surface2); color:var(--text); box-shadow:0 1px 8px rgba(0,0,0,0.5); }
+
+  /* PANELS */
+  .panel { display:none; flex:1; flex-direction:column; min-height:0; gap:clamp(6px,1.8vw,10px); overflow:hidden; }
+  .panel.active { display:flex; }
+
+  /* SLOT MACHINE */
+  .machine {
+    flex:1; min-height:0;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:space-evenly;
+    background:var(--surface);
+    border:1.5px solid var(--border);
+    border-radius:clamp(16px,4vw,24px);
+    padding:clamp(10px,3vw,18px);
+    position:relative;
+    overflow:hidden;
+  }
+  .machine::before {
+    content:'';
+    position:absolute; top:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg,transparent,var(--gold),transparent);
+  }
+
+  /* REELS */
+  .reels-wrap {
+    display:flex; gap:clamp(8px,2.5vw,14px);
+    align-items:center;
+  }
+  .reel {
+    width:clamp(72px,20vw,95px);
+    height:clamp(72px,20vw,95px);
+    background:var(--surface2);
+    border:2px solid var(--border);
+    border-radius:clamp(12px,3vw,18px);
+    display:flex; align-items:center; justify-content:center;
+    font-size:clamp(32px,9vw,46px);
+    position:relative;
+    overflow:hidden;
+    transition:border-color 0.3s ease;
+  }
+  .reel.spinning {
+    animation:reelSpin 0.12s linear infinite;
+    border-color:var(--gold);
+  }
+  .reel.win-flash { border-color:var(--gold); animation:winFlash 0.6s ease; }
+  .reel.lose-flash { border-color:var(--red); }
+
+  @keyframes reelSpin {
+    0%{transform:translateY(0)} 50%{transform:translateY(-8px)} 100%{transform:translateY(0)}
+  }
+  @keyframes winFlash {
+    0%{transform:scale(1)} 30%{transform:scale(1.15)} 60%{transform:scale(0.95)} 100%{transform:scale(1)}
+  }
+
+  /* BET SELECTOR */
+  .bet-section { width:100%; }
+  .bet-label {
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(9px,2.3vw,11px);
+    font-weight:700; color:var(--muted);
+    text-transform:uppercase; letter-spacing:1px;
+    margin-bottom:6px; text-align:center;
+  }
+  .bet-buttons {
+    display:flex; gap:6px; justify-content:center;
+  }
+  .bet-btn {
+    flex:1; max-width:90px;
+    padding:clamp(8px,2vw,11px) 4px;
+    border-radius:10px;
+    border:1.5px solid var(--border);
+    background:var(--surface2);
+    color:var(--muted);
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(10px,2.5vw,12px); font-weight:700;
+    cursor:pointer; transition:all 0.15s ease;
+  }
+  .bet-btn:hover { border-color:var(--gold); color:var(--gold); }
+  .bet-btn.active {
+    border-color:var(--gold); color:var(--gold);
+    background:rgba(255,215,0,0.08);
+    box-shadow:0 0 12px rgba(255,215,0,0.15);
+  }
+  .bet-btn:disabled { opacity:0.4; cursor:default; }
+
+  /* SPIN BUTTON */
+  .spin-btn {
+    width:100%; max-width:260px;
+    padding:clamp(12px,3vw,16px);
+    border-radius:var(--radius);
+    border:none;
+    background:linear-gradient(135deg,var(--gold),var(--gold2));
+    color:#0a0a0c;
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(13px,3.5vw,15px); font-weight:900;
+    cursor:pointer;
+    transition:transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+    letter-spacing:0.3px;
+    box-shadow:0 4px 20px rgba(255,215,0,0.25);
+  }
+  .spin-btn:hover:not(:disabled) { transform:scale(1.03); box-shadow:0 6px 28px rgba(255,215,0,0.35); }
+  .spin-btn:active:not(:disabled) { transform:scale(0.97); }
+  .spin-btn:disabled { opacity:0.5; cursor:default; transform:none; }
+
+  /* COMMENT */
+  .comment-box {
+    width:100%;
+    background:var(--surface2);
+    border:1.5px solid var(--border);
+    border-radius:var(--radius);
+    padding:clamp(10px,2.5vw,14px) clamp(12px,3vw,16px);
+    font-size:clamp(12px,3vw,14px);
+    line-height:1.5;
+    text-align:center;
+    color:var(--muted);
+    font-style:italic;
+    min-height:clamp(44px,10vw,56px);
+    display:flex; align-items:center; justify-content:center;
+    transition:all 0.3s ease;
+    flex-shrink:0;
+  }
+  .comment-box.win-comment { color:var(--green); border-color:rgba(0,230,118,0.3); font-style:normal; }
+  .comment-box.lose-comment { color:var(--red); border-color:rgba(255,23,68,0.3); font-style:normal; }
+  .comment-box.jackpot-comment {
+    color:var(--gold); border-color:var(--gold);
+    font-style:normal; font-weight:600;
+    box-shadow:0 0 20px rgba(255,215,0,0.2);
+    animation:jackpotPulse 1s ease infinite alternate;
+  }
+  @keyframes jackpotPulse { from{box-shadow:0 0 10px rgba(255,215,0,0.2)} to{box-shadow:0 0 30px rgba(255,215,0,0.5)} }
+
+  /* LEADERBOARD */
+  .leaderboard {
+    flex:1; min-height:0;
+    background:var(--surface);
+    border:1.5px solid var(--border);
+    border-radius:var(--radius);
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  .lb-header {
+    padding:clamp(10px,2.5vw,14px) clamp(14px,3vw,18px);
+    border-bottom:1px solid var(--border);
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(10px,2.6vw,12px); font-weight:700;
+    color:var(--muted); letter-spacing:1px; text-transform:uppercase;
+    flex-shrink:0;
+  }
+  .lb-list {
+    flex:1; overflow-y:auto; padding:clamp(6px,1.5vw,10px);
+    scrollbar-width:none;
+  }
+  .lb-list::-webkit-scrollbar { display:none; }
+  .lb-row {
+    display:grid; grid-template-columns:28px 1fr auto;
+    align-items:center; gap:10px;
+    padding:clamp(7px,1.8vw,10px) clamp(8px,2vw,12px);
+    border-radius:10px; transition:background 0.15s;
+  }
+  .lb-row:hover { background:var(--surface2); }
+  .lb-row.me {
+    background:linear-gradient(135deg,rgba(255,215,0,0.08),rgba(255,215,0,0.02));
+    border:1px solid rgba(255,215,0,0.2);
+  }
+  .lb-rank {
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(11px,2.8vw,13px); font-weight:700; text-align:center;
+  }
+  .lb-name {
+    font-size:clamp(12px,3vw,14px); font-weight:500;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .lb-name.me-label { color:var(--gold); }
+  .lb-balance {
+    font-family:'Unbounded',sans-serif;
+    font-size:clamp(11px,2.8vw,13px); font-weight:700;
+    text-align:right; white-space:nowrap;
+  }
+  .lb-balance.positive { color:var(--green); }
+  .lb-balance.negative { color:var(--red); }
+  .lb-empty { text-align:center; color:var(--muted); padding:24px; font-size:13px; }
+
+  /* SCREENS */
+  .loading-screen, .expired-screen {
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    height:100dvh; text-align:center; padding:30px; gap:16px;
+  }
+  .spinner {
+    width:36px; height:36px;
+    border:3px solid var(--border); border-top-color:var(--gold);
+    border-radius:50%; animation:spin 0.7s linear infinite;
+  }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .loading-text { color:var(--muted); font-size:14px; }
+  .expired-emoji { font-size:56px; }
+  .expired-title { font-family:'Unbounded',sans-serif; font-size:20px; font-weight:900; color:var(--gold); }
+  .expired-sub { color:var(--muted); font-size:14px; line-height:1.6; }
+
+  .hidden { display:none !important; }
+
+  /* WIN RAIN */
+  .win-rain {
+    position:fixed; inset:0; pointer-events:none; z-index:100;
+    display:none;
+  }
+  .win-rain.show { display:block; }
+  .coin {
+    position:absolute; top:-30px;
+    font-size:22px;
+    animation:fall linear forwards;
+  }
+  @keyframes fall {
+    to { transform:translateY(110vh) rotate(720deg); opacity:0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="win-rain" id="winRain"></div>
+
+<div class="loading-screen" id="loadingScreen">
+  <div class="spinner"></div>
+  <div class="loading-text">Казино открывается...</div>
+</div>
+
+<div class="expired-screen hidden" id="expiredScreen">
+  <div class="expired-emoji">⏱️</div>
+  <div class="expired-title">Ссылка устарела</div>
+  <div class="expired-sub">Напиши /casino в чате<br>и получи свежую ссылку</div>
+</div>
+
+<div class="app hidden" id="mainApp">
+
+  <div class="header">
+    <div class="logo">🎰 Казино</div>
+    <div class="balance-badge" id="balanceBadge">$...</div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" id="tabGame" onclick="switchTab('game')">🎰 Слоты</button>
+    <button class="tab" id="tabLb" onclick="switchTab('lb')">💰 Рейтинг</button>
+  </div>
+
+  <!-- GAME PANEL -->
+  <div class="panel active" id="panelGame">
+
+    <div class="machine">
+      <div class="reels-wrap">
+        <div class="reel" id="reel0">🎰</div>
+        <div class="reel" id="reel1">🎰</div>
+        <div class="reel" id="reel2">🎰</div>
+      </div>
+
+      <div class="bet-section">
+        <div class="bet-label">Ставка</div>
+        <div class="bet-buttons">
+          <button class="bet-btn active" onclick="selectBet(10)">$10</button>
+          <button class="bet-btn" onclick="selectBet(50)">$50</button>
+          <button class="bet-btn" onclick="selectBet(100)">$100</button>
+          <button class="bet-btn" onclick="selectBet(500)">$500</button>
+        </div>
+      </div>
+
+      <button class="spin-btn" id="spinBtn" onclick="doSpin()">🎰 КРУТИТЬ</button>
+    </div>
+
+    <div class="comment-box" id="commentBox">Нажми крутить и пусть удача решит твою судьбу</div>
+
+  </div>
+
+  <!-- LEADERBOARD PANEL -->
+  <div class="panel" id="panelLb">
+    <div class="leaderboard">
+      <div class="lb-header">💰 Кто богаче</div>
+      <div class="lb-list" id="lbList">
+        <div class="lb-empty">Загружаем рейтинг...</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const RAILWAY = "https://summarybot-production-0954.up.railway.app";
+  const SYMBOLS = ['🍒','🍋','7️⃣','💎','🍆','🎲','⭐','💫'];
+  const TOKEN_TTL = 300;
+  const MEDALS = ["🥇","🥈","🥉"];
+
+  let playerToken = null;
+  let playerName = null;
+  let tokenTs = 0;
+  let currentBet = 10;
+  let currentBalance = 0;
+  let spinning = false;
+
+  // ─── INIT ───
+  window.addEventListener('load', async () => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    if (!token) { showExpired(); return; }
+
+    try {
+      const b64 = token.split(".")[0];
+      const bytes = Uint8Array.from(atob(b64.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0));
+      const payload = JSON.parse(new TextDecoder('utf-8').decode(bytes));
+      if (Math.floor(Date.now()/1000) - payload.ts > TOKEN_TTL) { showExpired(); return; }
+      playerToken = token;
+      playerName = payload.user_name;
+      tokenTs = payload.ts;
+    } catch(e) { showExpired(); return; }
+
+    // Получаем баланс с сервера
+    try {
+      const res = await fetch(`${RAILWAY}/casino/balance?token=${encodeURIComponent(playerToken)}`);
+      const data = await res.json();
+      currentBalance = data.balance;
+    } catch(e) {
+      currentBalance = 1000;
+    }
+
+    document.getElementById("loadingScreen").classList.add("hidden");
+    document.getElementById("mainApp").classList.remove("hidden");
+    updateBalanceBadge();
+    loadLeaderboard();
+  });
+
+  // ─── TABS ───
+  function switchTab(tab) {
+    document.getElementById("tabGame").classList.toggle("active", tab==='game');
+    document.getElementById("tabLb").classList.toggle("active", tab==='lb');
+    document.getElementById("panelGame").classList.toggle("active", tab==='game');
+    document.getElementById("panelLb").classList.toggle("active", tab==='lb');
+    if (tab === 'lb') loadLeaderboard();
+  }
+
+  // ─── BET ───
+  function selectBet(amount) {
+    currentBet = amount;
+    document.querySelectorAll('.bet-btn').forEach(b => {
+      b.classList.toggle('active', b.textContent === `$${amount}`);
+    });
+  }
+
+  // ─── BALANCE ───
+  function updateBalanceBadge(delta) {
+    const badge = document.getElementById("balanceBadge");
+    const fmt = currentBalance >= 0
+      ? `$${currentBalance.toLocaleString('ru')}`
+      : `-$${Math.abs(currentBalance).toLocaleString('ru')}`;
+    badge.textContent = fmt;
+    badge.className = 'balance-badge';
+    if (delta > 0) badge.classList.add('win');
+    else if (delta < 0) badge.classList.add('lose');
+    if (currentBalance < 0) badge.classList.add('negative');
+    if (delta !== undefined) {
+      setTimeout(() => {
+        badge.className = 'balance-badge' + (currentBalance < 0 ? ' negative' : '');
+      }, 1200);
+    }
+  }
+
+  // ─── SPIN ───
+  async function doSpin() {
+    if (spinning) return;
+
+    const age = Math.floor(Date.now()/1000) - tokenTs;
+    if (age >= TOKEN_TTL) {
+      showComment("Ссылка истекла. Напиши /casino в чате.", "lose-comment");
+      return;
+    }
+
+    spinning = true;
+    document.getElementById("spinBtn").disabled = true;
+    document.querySelectorAll('.bet-btn').forEach(b => b.disabled = true);
+
+    // Запускаем анимацию
+    startSpinAnimation();
+
+    try {
+      const res = await fetch(`${RAILWAY}/casino/spin`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ token: playerToken, bet: currentBet })
+      });
+      const data = await res.json();
+
+      if (!data.ok) throw new Error(data.error || "Ошибка сервера");
+
+      // Ждём минимум 1.5 сек анимации
+      await delay(1500);
+      stopSpinAnimation(data.symbols, data.result_type, data.delta);
+
+      currentBalance = data.new_balance;
+      updateBalanceBadge(data.delta);
+
+      await delay(600);
+      showComment(data.comment, getCommentClass(data.result_type));
+
+      if (data.result_type === 'jackpot' || data.result_type === 'bigwin') {
+        triggerWinRain(data.result_type);
+      }
+
+      loadLeaderboard();
+
+    } catch(e) {
+      await delay(1500);
+      stopSpinAnimation(['❌','❌','❌'], 'lose', 0);
+      showComment("Что-то пошло не так. Попробуй ещё раз.", "lose-comment");
+    }
+
+    await delay(800);
+    spinning = false;
+    document.getElementById("spinBtn").disabled = false;
+    document.querySelectorAll('.bet-btn').forEach(b => b.disabled = false);
+  }
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // ─── REEL ANIMATION ───
+  const SPIN_SYMBOLS = ['🍒','🍋','7️⃣','💎','🍆','⭐','💫','🎲'];
+  let spinIntervals = [];
+
+  function startSpinAnimation() {
+    [0,1,2].forEach(i => {
+      const reel = document.getElementById(`reel${i}`);
+      reel.classList.add('spinning');
+      reel.classList.remove('win-flash','lose-flash');
+      const iv = setInterval(() => {
+        reel.textContent = SPIN_SYMBOLS[Math.floor(Math.random() * SPIN_SYMBOLS.length)];
+      }, 80);
+      spinIntervals[i] = iv;
+    });
+  }
+
+  function stopSpinAnimation(symbols, resultType, delta) {
+    [0,1,2].forEach((i, idx) => {
+      setTimeout(() => {
+        clearInterval(spinIntervals[i]);
+        const reel = document.getElementById(`reel${i}`);
+        reel.classList.remove('spinning');
+        reel.textContent = symbols[i];
+        if (delta > 0) reel.classList.add('win-flash');
+        else reel.classList.add('lose-flash');
+      }, idx * 200);
+    });
+  }
+
+  function getCommentClass(resultType) {
+    if (resultType === 'jackpot') return 'jackpot-comment';
+    if (resultType === 'bigwin' || resultType === 'win' || resultType === 'pair') return 'win-comment';
+    return 'lose-comment';
+  }
+
+  function showComment(text, cls) {
+    const box = document.getElementById("commentBox");
+    box.className = `comment-box ${cls}`;
+    box.textContent = text;
+  }
+
+  // ─── WIN RAIN ───
+  function triggerWinRain(type) {
+    const rain = document.getElementById("winRain");
+    rain.innerHTML = '';
+    rain.classList.add('show');
+    const emoji = type === 'jackpot' ? '🍆' : '💎';
+    const count = type === 'jackpot' ? 30 : 15;
+    for (let i = 0; i < count; i++) {
+      setTimeout(() => {
+        const coin = document.createElement('div');
+        coin.className = 'coin';
+        coin.textContent = i % 3 === 0 ? '💰' : emoji;
+        coin.style.left = Math.random() * 100 + 'vw';
+        coin.style.animationDuration = (1 + Math.random() * 1.5) + 's';
+        coin.style.animationDelay = Math.random() * 0.5 + 's';
+        rain.appendChild(coin);
+      }, i * 60);
+    }
+    setTimeout(() => { rain.classList.remove('show'); rain.innerHTML=''; }, 3500);
+  }
+
+  // ─── LEADERBOARD ───
+  async function loadLeaderboard() {
+    try {
+      const res = await fetch(`${RAILWAY}/casino/leaderboard`);
+      const data = await res.json();
+      renderLeaderboard(data.board || []);
+    } catch(e) {
+      document.getElementById("lbList").innerHTML = '<div class="lb-empty">Не удалось загрузить</div>';
+    }
+  }
+
+  function renderLeaderboard(board) {
+    const list = document.getElementById("lbList");
+    if (!board.length) {
+      list.innerHTML = '<div class="lb-empty">Никто ещё не спустил деньги 👀</div>';
+      return;
+    }
+    list.innerHTML = board.map((p, i) => {
+      const isMe = p.name === playerName;
+      let rank;
+      if (i < 3) rank = MEDALS[i];
+      else if (i === board.length - 1 && board.length > 3) rank = "💩";
+      else rank = `<span style="color:var(--muted);font-size:12px">${i+1}</span>`;
+      const balClass = p.balance >= 0 ? 'positive' : 'negative';
+      const balFmt = p.balance >= 0 ? `$${p.balance.toLocaleString('ru')}` : `-$${Math.abs(p.balance).toLocaleString('ru')}`;
+      return `
+        <div class="lb-row ${isMe?'me':''}">
+          <div class="lb-rank">${rank}</div>
+          <div class="lb-name ${isMe?'me-label':''}">${esc(p.name)}${isMe?' 👈':''}</div>
+          <div class="lb-balance ${balClass}">${balFmt}</div>
+        </div>`;
+    }).join('');
+  }
+
+  function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function showExpired() {
+    document.getElementById("loadingScreen").classList.add("hidden");
+    document.getElementById("expiredScreen").classList.remove("hidden");
+  }
+</script>
+</body>
+</html>
