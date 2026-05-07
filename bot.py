@@ -501,6 +501,19 @@ async def cmd_game(message: types.Message):
         )
     ]])
     await message.answer("🍆 Турнир позора открыт:", reply_markup=keyboard)
+    
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    args = message.text.split()
+    if len(args) > 1 and args[1] == "game":
+        game_url = f"{MINI_APP_URL}?chat_id={ALLOWED_CHAT_ID}"
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(
+                text="🎮 Открыть игру",
+                web_app=types.WebAppInfo(url=game_url)
+            )
+        ]])
+        await message.answer("🍆 Турнир позора открыт:", reply_markup=keyboard)
 
 @dp.message(Command("peepee"))
 async def cmd_peepee(message: types.Message):
