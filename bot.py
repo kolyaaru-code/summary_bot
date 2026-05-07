@@ -1,6 +1,7 @@
 import asyncio
 import os
 import io
+import random
 from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -15,9 +16,6 @@ GROQ_KEY = os.getenv("GROQ_KEY")
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-# URL мини-приложения
-MINI_APP_URL = "https://kolyaaru-code.github.io/peepee_game/index.html"
 
 MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
@@ -120,7 +118,8 @@ def get_dayana_questions(chat_id: int, hours: int) -> list:
     finally:
         release_conn(conn)
 
-def get_last_messages(chat_id: int, limit: int = 20) -> list:
+def get_last_messages(chat_id: int, limit: int = 10) -> list:
+    """Берём последние N сообщений из чата для контекста Даяны"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -132,21 +131,7 @@ def get_last_messages(chat_id: int, limit: int = 20) -> list:
                 LIMIT %s
             ''', (chat_id, limit))
             rows = cursor.fetchall()
-            return list(reversed(rows))
-    finally:
-        release_conn(conn)
-
-def get_peepee_scores(chat_id: int) -> list:
-    conn = get_conn()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute('''
-                SELECT user_name, wins, losses
-                FROM peepee_scores
-                WHERE chat_id = %s AND (wins + losses) > 0
-                ORDER BY wins DESC, losses ASC
-            ''', (chat_id,))
-            return cursor.fetchall()
+            return list(reversed(rows))  # возвращаем в хронологическом порядке
     finally:
         release_conn(conn)
 
@@ -166,6 +151,45 @@ def cleanup_old_messages():
     except Exception as e:
         print(f"Ошибка очистки БД: {e}")
         conn.rollback()
+    finally:
+        release_conn(conn)
+
+def update_peepee_score(chat_id: int, user_id: int, user_name: str, won: bool):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                INSERT INTO peepee_scores (chat_id, user_id, user_name, wins, losses)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    user_name = EXCLUDED.user_name,
+                    wins = peepee_scores.wins + %s,
+                    losses = peepee_scores.losses + %s
+            ''', (
+                chat_id, user_id, user_name,
+                1 if won else 0,
+                0 if won else 1,
+                1 if won else 0,
+                0 if won else 1,
+            ))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка обновления счёта: {e}")
+        conn.rollback()
+    finally:
+        release_conn(conn)
+
+def get_peepee_scores(chat_id: int) -> list:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_name, wins, losses
+                FROM peepee_scores
+                WHERE chat_id = %s AND (wins + losses) > 0
+                ORDER BY wins DESC, losses ASC
+            ''', (chat_id,))
+            return cursor.fetchall()
     finally:
         release_conn(conn)
 
@@ -218,6 +242,7 @@ def build_prompt_text(rows: list) -> str:
     return result
 
 def format_context(rows: list) -> str:
+    """Форматируем последние сообщения для контекста Даяны"""
     result = ""
     for r in rows:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
@@ -463,7 +488,7 @@ async def cmd_help(message: types.Message):
         "/help — это сообщение\n\n"
         "⚠️ Максимум: 48 часов за один запрос\n"
         "🎤 Голосовые и кружочки тоже учитываются\n\n"
-        "🎮 /game — найди писюн (открывает игру)\n"
+        "🎮 /game — найди писюн\n"
         "🍆 /peepee — рейтинг охотников\n"
         "📊 /mypeepee — твоя статистика\n\n"
         "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
@@ -472,48 +497,77 @@ async def cmd_help(message: types.Message):
     )
     await message.answer(help_text, parse_mode="HTML")
 
-# /game теперь открывает Mini App — чат не засоряется
 @dp.message(Command("game"))
 async def cmd_game(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
-    # Передаём chat_id группы в URL — тогда турнирка будет общей
-    game_url = f"{MINI_APP_URL}?chat_id={ALLOWED_CHAT_ID}"
+    winner_pos = random.randint(0, 8)
+    keyboard = []
+    row = []
+    for i in range(9):
+        row.append(types.InlineKeyboardButton(
+            text="📦",
+            callback_data=f"box_{i}_{winner_pos}"
+        ))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
 
-    if message.chat.type in ("group", "supergroup"):
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
-            types.InlineKeyboardButton(
-                text="🎮 Открыть игру",
-                url=f"https://t.me/{(await bot.get_me()).username}?start=game"
-            )
-        ]])
-        await message.answer(
-            "🍆 Игра открывается в личке с ботом:",
-            reply_markup=keyboard
-        )
-        return
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await message.answer("🎮 Найди писюн! Открой одну коробку:", reply_markup=markup)
 
-    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
-        types.InlineKeyboardButton(
-            text="🎮 Открыть игру",
-            web_app=types.WebAppInfo(url=game_url)
-        )
-    ]])
-    await message.answer("🍆 Турнир позора открыт:", reply_markup=keyboard)
-    
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    args = message.text.split()
-    if len(args) > 1 and args[1] == "game":
-        game_url = f"{MINI_APP_URL}?chat_id={ALLOWED_CHAT_ID}"
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
-            types.InlineKeyboardButton(
-                text="🎮 Открыть игру",
-                web_app=types.WebAppInfo(url=game_url)
-            )
-        ]])
-        await message.answer("🍆 Турнир позора открыт:", reply_markup=keyboard)
+@dp.callback_query(lambda c: c.data.startswith("box_"))
+async def process_box(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    chosen = int(parts[1])
+    winner = int(parts[2])
+    name = callback.from_user.first_name or "Анон"
+    user_id = callback.from_user.id
+
+    won = chosen == winner
+    update_peepee_score(callback.message.chat.id, user_id, name, won)
+
+    keyboard = []
+    row = []
+    for i in range(9):
+        if i == winner:
+            text = "🍆"
+        elif i == chosen and chosen != winner:
+            text = "💨"
+        else:
+            text = "📦"
+        row.append(types.InlineKeyboardButton(
+            text=text,
+            callback_data="done"
+        ))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    win_taunts = [
+        f"🍆 {name} нашёл! Ну и что, теперь что с ним делать будешь?",
+        f"🎉 {name} везунчик, нашёл писюн. Маме расскажи.",
+        f"🍆 {name} нашёл писюн. Видимо не первый раз ищет.",
+        f"🎉 Ну надо же, {name} справился. Запиши в резюме.",
+    ]
+
+    lose_taunts = [
+        f"💨 {name}, ну ты лох. Писюн был в коробке {winner + 1}, а ты куда полез?",
+        f"🗑 {name} не нашёл. Руки из жопы, коробка {winner + 1} же была очевидна.",
+        f"💨 {name} промазал мимо писюна. Это талант — коробка {winner + 1} прямо смотрела на тебя.",
+        f"🤡 {name}, серьёзно? Писюн в коробке {winner + 1} сидел и ждал, а ты мимо.",
+    ]
+
+    result = random.choice(win_taunts) if won else random.choice(lose_taunts)
+    await callback.message.edit_text(result, reply_markup=markup)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "done")
+async def process_done(callback: types.CallbackQuery):
+    await callback.answer("Игра уже закончена!", show_alert=False)
 
 @dp.message(Command("peepee"))
 async def cmd_peepee(message: types.Message):
@@ -523,7 +577,7 @@ async def cmd_peepee(message: types.Message):
     rows = get_peepee_scores(message.chat.id)
 
     if not rows:
-        await message.answer("Ещё никто не играл. Напиши /game и начни позориться!")
+        await message.answer("Ещё никто не играл. Введи /game и начни позориться!")
         return
 
     medals = ["🥇", "🥈", "🥉"]
@@ -566,7 +620,7 @@ async def cmd_mypeepee(message: types.Message):
         release_conn(conn)
 
     if not row:
-        await message.answer(f"{name}, ты ещё не играл. Напиши /game!")
+        await message.answer(f"{name}, ты ещё не играл. Введи /game!")
         return
 
     wins, losses = row
@@ -708,7 +762,7 @@ async def collect_messages(message: types.Message):
         # Триггер: "Даяна кто виноват"
         if "даяна" in text_lower and "виноват" in text_lower:
             try:
-                rows = get_last_messages(message.chat.id, limit=20)
+                rows = get_last_messages(message.chat.id, limit=10)
                 if not rows:
                     await message.reply("Не в чем разбираться — чат пустой.")
                     return
