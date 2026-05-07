@@ -1,5 +1,6 @@
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from psycopg2 import pool
 from dotenv import load_dotenv
 
@@ -8,6 +9,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 
 app = Flask(__name__)
+CORS(app)  # ← разрешаем запросы с других доменов
 db_pool = pool.SimpleConnectionPool(1, 5, DATABASE_URL)
 
 def get_conn():

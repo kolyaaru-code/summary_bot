@@ -3,3 +3,4 @@ python-dotenv
 groq
 psycopg2-binary
 flask
+flask-cors
