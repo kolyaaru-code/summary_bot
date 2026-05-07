@@ -8,6 +8,9 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 from groq import Groq
 from psycopg2 import pool
+from aiohttp import web
+import hmac
+import hashlib
 
 # 1. НАСТРОЙКИ
 load_dotenv()
@@ -809,6 +812,15 @@ async def main():
     init_db()
     cleanup_old_messages()
     print("Бот запущен и готов к работе!")
+
+    app = web.Application()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Веб-сервер запущен на порту {port}")
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
