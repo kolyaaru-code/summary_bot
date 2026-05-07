@@ -478,10 +478,26 @@ async def cmd_game(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
+    # Передаём chat_id группы в URL — тогда турнирка будет общей
+    game_url = f"{MINI_APP_URL}?chat_id={ALLOWED_CHAT_ID}"
+
+    if message.chat.type in ("group", "supergroup"):
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+            types.InlineKeyboardButton(
+                text="🎮 Открыть игру",
+                url=f"https://t.me/{(await bot.get_me()).username}?start=game"
+            )
+        ]])
+        await message.answer(
+            "🍆 Игра открывается в личке с ботом:",
+            reply_markup=keyboard
+        )
+        return
+
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(
             text="🎮 Открыть игру",
-            web_app=types.WebAppInfo(url=MINI_APP_URL)
+            web_app=types.WebAppInfo(url=game_url)
         )
     ]])
     await message.answer("🍆 Турнир позора открыт:", reply_markup=keyboard)
