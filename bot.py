@@ -24,7 +24,9 @@ TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 RAILWAY_URL = os.getenv("RAILWAY_URL", "")
 GAME_URL = "https://kolyaaru-code.github.io/summary_bot/"
-TOKEN_TTL = 300  # токен живёт 5 минут
+CASINO_URL = "https://kolyaaru-code.github.io/summary_bot/casino.html"
+TOKEN_TTL = 300
+CASINO_START_BALANCE = 1000
 
 MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
@@ -54,11 +56,11 @@ def init_db():
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('''CREATE TABLE IF NOT EXISTS history 
-                             (id SERIAL PRIMARY KEY, 
+            cursor.execute('''CREATE TABLE IF NOT EXISTS history
+                             (id SERIAL PRIMARY KEY,
                               chat_id BIGINT,
-                              user_name TEXT, 
-                              message_text TEXT, 
+                              user_name TEXT,
+                              message_text TEXT,
                               timestamp TIMESTAMPTZ DEFAULT NOW())''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS peepee_scores
                              (id SERIAL PRIMARY KEY,
@@ -74,6 +76,13 @@ def init_db():
                               user_name TEXT,
                               question TEXT,
                               timestamp TIMESTAMPTZ DEFAULT NOW())''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS casino_balances
+                             (id SERIAL PRIMARY KEY,
+                              chat_id BIGINT,
+                              user_id BIGINT,
+                              user_name TEXT,
+                              balance INTEGER DEFAULT 1000,
+                              UNIQUE(chat_id, user_id))''')
         conn.commit()
         print("БД инициализирована")
     finally:
@@ -147,12 +156,8 @@ def cleanup_old_messages():
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM history WHERE timestamp < NOW() - INTERVAL '7 days'"
-            )
-            cursor.execute(
-                "DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '7 days'"
-            )
+            cursor.execute("DELETE FROM history WHERE timestamp < NOW() - INTERVAL '7 days'")
+            cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '7 days'")
             deleted = cursor.rowcount
         conn.commit()
         print(f"Очистка БД: удалено {deleted} старых записей")
@@ -175,10 +180,8 @@ def update_peepee_score(chat_id: int, user_id: int, user_name: str, won: bool):
                     losses = peepee_scores.losses + %s
             ''', (
                 chat_id, user_id, user_name,
-                1 if won else 0,
-                0 if won else 1,
-                1 if won else 0,
-                0 if won else 1,
+                1 if won else 0, 0 if won else 1,
+                1 if won else 0, 0 if won else 1,
             ))
         conn.commit()
     except Exception as e:
@@ -201,7 +204,202 @@ def get_peepee_scores(chat_id: int) -> list:
     finally:
         release_conn(conn)
 
-# 3. УМНАЯ ОБРЕЗКА СООБЩЕНИЙ
+# 3. КАЗИНО — БД
+def get_or_create_casino_balance(chat_id: int, user_id: int, user_name: str) -> int:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                INSERT INTO casino_balances (chat_id, user_id, user_name, balance)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    user_name = EXCLUDED.user_name
+                RETURNING balance
+            ''', (chat_id, user_id, user_name, CASINO_START_BALANCE))
+            conn.commit()
+            return cursor.fetchone()[0]
+    except Exception as e:
+        print(f"Ошибка get_or_create_casino_balance: {e}")
+        conn.rollback()
+        return CASINO_START_BALANCE
+    finally:
+        release_conn(conn)
+
+def update_casino_balance(chat_id: int, user_id: int, delta: int) -> int:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                UPDATE casino_balances
+                SET balance = balance + %s
+                WHERE chat_id = %s AND user_id = %s
+                RETURNING balance
+            ''', (delta, chat_id, user_id))
+            conn.commit()
+            row = cursor.fetchone()
+            return row[0] if row else 0
+    except Exception as e:
+        print(f"Ошибка update_casino_balance: {e}")
+        conn.rollback()
+        return 0
+    finally:
+        release_conn(conn)
+
+def get_casino_leaderboard(chat_id: int) -> list:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_name, balance
+                FROM casino_balances
+                WHERE chat_id = %s
+                ORDER BY balance DESC
+            ''', (chat_id,))
+            return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
+# 4. КАЗИНО — ЛОГИКА СЛОТОВ
+SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
+
+def spin_slots(bet: int) -> dict:
+    """
+    Вероятности:
+      55% — все разные (проигрыш, x0)
+      25% — два одинаковых (x1.5)
+      10% — 🍒🍒🍒 (x3)
+       5% — 🍋🍋🍋 (x5)
+       3% — 7️⃣7️⃣7️⃣ (x15)
+     1.5% — 💎💎💎 (x10)
+     0.5% — 🍆🍆🍆 (x20, джекпот)
+    """
+    r = random.random()
+
+    if r < 0.55:
+        symbols = random.sample(SLOT_SYMBOLS, 3)
+        multiplier = 0
+        result_type = "lose"
+    elif r < 0.80:
+        sym = random.choice(SLOT_SYMBOLS)
+        others = [s for s in SLOT_SYMBOLS if s != sym]
+        third = random.choice(others)
+        pos = random.sample([0, 1, 2], 2)
+        symbols = [third, third, third]
+        symbols[pos[0]] = sym
+        symbols[pos[1]] = sym
+        symbols[2 if 2 not in pos else (1 if 1 not in pos else 0)] = third
+        multiplier = 1.5
+        result_type = "pair"
+    elif r < 0.90:
+        symbols = ['🍒', '🍒', '🍒']
+        multiplier = 3
+        result_type = "win"
+    elif r < 0.95:
+        symbols = ['🍋', '🍋', '🍋']
+        multiplier = 5
+        result_type = "win"
+    elif r < 0.98:
+        symbols = ['7️⃣', '7️⃣', '7️⃣']
+        multiplier = 15
+        result_type = "bigwin"
+    elif r < 0.995:
+        symbols = ['💎', '💎', '💎']
+        multiplier = 10
+        result_type = "bigwin"
+    else:
+        symbols = ['🍆', '🍆', '🍆']
+        multiplier = 20
+        result_type = "jackpot"
+
+    winnings = int(bet * multiplier)
+    delta = winnings - bet
+    return {
+        "symbols": symbols,
+        "multiplier": multiplier,
+        "winnings": winnings,
+        "delta": delta,
+        "result_type": result_type
+    }
+
+def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int) -> str:
+    """Стебные комментарии в стиле Бати, с матом, по ситуации"""
+
+    if result_type == "jackpot":
+        return random.choice([
+            f"ДЖЕКПОТ, СУКА!!! {name}, ты выиграл всё что можно было выиграть в этой помойке! Звони маме, пиши в резюме. Но мы оба знаем — ты это всё просрёшь обратно. Крути дальше.",
+            f"🍆🍆🍆 ТРИ ПИСЮНА! {name}, это знак судьбы. Либо немедленно уходи победителем, либо оставайся и проиграй всё. Мы угадали что ты выберешь.",
+            f"СТОП. {name} сорвал джекпот. Казино официально в панике. Наслаждайся моментом — он не повторится никогда в жизни.",
+        ])
+
+    if result_type == "bigwin":
+        return random.choice([
+            f"ЕБАТЬ ТЫ ФОРТОВЫЙ, {name}! Скорее депай ещё пока колесо фортуны не заметило свою ошибку. Такое везение случается раз в жизни — и ты уже потратил свой шанс.",
+            f"Ничего себе, {name}! Большой куш! Самое время остановиться... но ты же не остановишься, да? Мы знаем тебя.",
+            f"{name} поднял серьёзные бабки. Казино смотрит на тебя с уважением и ненавистью одновременно. Крути ещё — нам нужно вернуть своё.",
+        ])
+
+    if result_type == "win":
+        return random.choice([
+            f"О, {name} выиграл! Скорее депай ещё пока везёт, идиот. Удача — она как кошка: погладил раз, укусит два.",
+            f"Смотри-ка, {name} в плюсе! Это называется 'начало конца'. Казино специально так делает — сначала даёт выиграть, потом забирает всё.",
+            f"{name}, поздравляю с маленькой победой в большой войне с казино. Спойлер: казино выиграет войну.",
+            f"Повезло {name}! Теперь ставь больше — раз пошла такая пьянка. Логика железная, да?",
+        ])
+
+    if result_type == "pair":
+        return random.choice([
+            f"Пара у {name}. Х1.5, красавчик. Это не выигрыш, это подачка. Казино кормит тебя с ладони как голубя.",
+            f"{name}, пара — это казино говорит тебе 'иди сюда, хороший'. Не ведись. Хотя ты уже ведёшься.",
+            f"Маленький плюсик для {name}. Аппарат прогревается. Следующий спин будет либо джекпот либо дно — угадай что вероятнее.",
+        ])
+
+    # Проигрыш — градация по балансу
+    if new_balance >= 1000:
+        return random.choice([
+            f"Мимо, {name}. Бывает. Ты ещё в плюсе — есть что терять. Это самое опасное состояние для лудомана.",
+            f"{name} слил ставку. Деньги ещё есть, значит казино своё ещё получит. Крути дальше.",
+            f"Ай, {name}, не повезло. Зато ты богатый пока. Ключевое слово — пока.",
+        ])
+
+    elif new_balance >= 500:
+        return random.choice([
+            f"Хм, {name}... Денежки тают. Чуешь этот запах? Это твои сбережения горят. Красиво горят, надо признать.",
+            f"{name}, осторожно — пахнет лудкой. Ты ещё не закрыл вкладку? Конечно нет. Понятно.",
+            f"Баланс падает, {name}. Это нормально, говоришь себе. Всего одна удачная ставка и отыграюсь. Классика жанра.",
+        ])
+
+    elif new_balance >= 0:
+        return random.choice([
+            f"Почка ещё на месте, {name}? Проверь — скоро пригодится. Ты почти на нуле, дружище.",
+            f"{name}, ты в опасной близости от дна. Большинство людей на этом месте остановились бы. Но ты же не большинство.",
+            f"Осталось совсем чуть-чуть, {name}. Либо сейчас повезёт и отыграешься, либо... ну ты понимаешь. Крути.",
+        ])
+
+    elif new_balance >= -1000:
+        return random.choice([
+            f"ПОЗДРАВЛЯЮ, {name}! Ты официально в минусе! Почку уже оценил? На рынке сейчас неплохие цены.",
+            f"{name} ушёл в минус. Это не конец — это начало настоящей лудки. Добро пожаловать в клуб.",
+            f"Минус на балансе у {name}. Машину продавать ещё рано, но держи документы наготове.",
+            f"О, {name} в красной зоне! Звони другу, занимай бабки — казино ждёт. Долг — не проблема, проблема — не отыграться.",
+        ])
+
+    elif new_balance >= -5000:
+        return random.choice([
+            f"{name}, ты уже серьёзно в яме. Хату заложил? Машину продал? Нет? Значит ещё есть что терять. Крути.",
+            f"Глубокий минус у {name}. На этом уровне нормальные люди звонят на горячую линию психологической помощи. Ты не нормальный — ты наш человек.",
+            f"СТОП, {name}. Нет, серьёзно, стоп. Подумай. Подумал? Хорошо. А теперь крути — думать вредно для азарта.",
+            f"{name} зарылся как крот. На этой глубине уже темно и страшно. Но джекпот где-то здесь, правда же? Правда?",
+        ])
+
+    else:
+        return random.choice([
+            f"ЛЕГЕНДА. {name} установил антирекорд казино. Это надо уметь. Напиши завещание и крути дальше — нам нужен новый рекорд.",
+            f"{name}, ты на такой глубине что уже видно магму. Казино тебя уважает. Казино тебя боготворит. Казино на тебе построило новое крыло.",
+            f"На этом уровне долга, {name}, уже не стыдно. Это искусство. Это дно такой красоты что хочется плакать и аплодировать одновременно.",
+            f"Друг, {name}... мы уже даже стебаться не можем. Это за гранью. Это легенда. Твоё имя впишут в историю этого казино золотыми буквами.",
+        ])
+
+# 5. УМНАЯ ОБРЕЗКА СООБЩЕНИЙ
 def build_prompt_text(rows: list) -> str:
     if not rows:
         return ""
@@ -245,11 +443,10 @@ def format_context(rows: list) -> str:
         result += f"[{time_str}] {r[0]}: {r[1]}\n"
     return result
 
-# 4. ТРАНСКРИБАЦИЯ ГОЛОСА
+# 6. ТРАНСКРИБАЦИЯ ГОЛОСА
 async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str | None:
     size_mb = file_size / (1024 * 1024)
     if size_mb > MAX_VOICE_SIZE_MB:
-        print(f"Файл слишком большой: {size_mb:.1f} МБ — пропускаем")
         return f"[файл слишком большой для распознавания: {size_mb:.1f} МБ]"
     try:
         buffer = io.BytesIO()
@@ -257,15 +454,14 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
         buffer.seek(0)
         buffer.name = filename
         transcription = client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo",
-            file=buffer,
+            model="whisper-large-v3-turbo", file=buffer,
         )
         return transcription.text
     except Exception as e:
         print(f"Ошибка транскрибации: {e}")
         return None
 
-# 5. БЛОК ДАЯНЫ ДЛЯ САММАРИ
+# 7. БЛОК ДАЯНЫ ДЛЯ САММАРИ
 def get_dayana_block(questions: list) -> str:
     if not questions:
         return ""
@@ -290,15 +486,14 @@ def get_dayana_block(questions: list) -> str:
         completion = client_dayana.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.85,
-            max_tokens=400,
+            temperature=0.85, max_tokens=400,
         )
         return completion.choices[0].message.content
     except Exception as e:
         print(f"Ошибка блока Даяны: {e}")
         return "\n".join([f"• {q[0]} спрашивал(а): {q[1]}" for q in questions])
 
-# 6. САММАРИ
+# 8. САММАРИ
 def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток, не раздувай из мухи слона."
@@ -349,8 +544,7 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.85,
-                max_tokens=1500,
+                temperature=0.85, max_tokens=1500,
             )
             return completion.choices[0].message.content
         except Exception as e:
@@ -360,7 +554,7 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
             raise
     raise Exception("Все модели исчерпали лимит. Попробуй позже.")
 
-# 7. ДАЯНА — ОТВЕТ НА ВОПРОС
+# 9. ДАЯНА
 def ask_dayana(question: str) -> str:
     prompt = f"""
 Ты — Даяна. Не ассистент, не бот, не помощник. Даяна.
@@ -382,26 +576,21 @@ def ask_dayana(question: str) -> str:
     completion = client_dayana.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.8,
-        max_tokens=800,
+        temperature=0.8, max_tokens=800,
     )
     return completion.choices[0].message.content
 
-# 8. ДАЯНА — РАССУДИТЬ СПОР
 def dayana_judge(context: str) -> str:
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами, острым языком и абсолютным чувством справедливости.
 Тебя попросили рассудить спор или ситуацию в чате.
 
 КАК ГОВОРИШЬ:
-- Начни ответ с короткого атмосферного действия в asterisk — что-то из серии закуриваешь тонкую сигарету Kiss, поправляешь очки, делаешь глоток кофе и т.д. Каждый раз разное, в зависимости от настроения ситуации.
-- Формат начала строго такой: *[действие]* — и дальше сразу текст.
+- Начни ответ с короткого атмосферного действия в asterisk.
+- Формат: *[действие]* — и дальше сразу текст.
 - Пример: *закуривает сигарету Kiss, смотрит в окно* — Так, разберёмся...
-- После этого читаешь контекст и выносишь чёткий вердикт — кто прав, кто нет и почему.
-- Никаких "с одной стороны... с другой стороны". Ты говоришь прямо.
-- Можешь поддеть того кто неправ — но справедливо, не злобно.
-- Если все неправы — скажи об этом прямо.
-- Коротко и по делу. Максимум 5-6 предложений после действия.
+- Выносишь чёткий вердикт. Никаких "с одной стороны". Ты говоришь прямо.
+- Коротко и по делу. Максимум 5-6 предложений.
 - Отвечаешь на русском языке.
 
 ПОСЛЕДНИЕ СООБЩЕНИЯ В ЧАТЕ:
@@ -412,12 +601,10 @@ def dayana_judge(context: str) -> str:
     completion = client_dayana.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.8,
-        max_tokens=500,
+        temperature=0.8, max_tokens=500,
     )
     return completion.choices[0].message.content
 
-# 9. ДАЯНА — КТО ВИНОВАТ
 def dayana_guilty(context: str) -> str:
     prompt = f"""
 Ты — Даяна. Секретарша с холодной головой и острым взглядом.
@@ -425,9 +612,8 @@ def dayana_guilty(context: str) -> str:
 
 КАК ГОВОРИШЬ:
 - Читаешь контекст и чётко называешь кто виноват и почему.
-- Никаких отмазок и расплывчатых формулировок — конкретное имя и конкретная причина.
+- Никаких отмазок — конкретное имя и конкретная причина.
 - Можешь быть саркастичной — но справедливой.
-- Если все виноваты — распредели вину по справедливости.
 - Коротко: назначила виноватого, объяснила почему, точка.
 - Отвечаешь на русском языке.
 
@@ -439,16 +625,14 @@ def dayana_guilty(context: str) -> str:
     completion = client_dayana.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.8,
-        max_tokens=400,
+        temperature=0.8, max_tokens=400,
     )
     return completion.choices[0].message.content
 
-# 10. ФЕЙС-КОНТРОЛЬ
+# 10. УТИЛИТЫ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-# 11. РАЗБИВКА ДЛИННЫХ СООБЩЕНИЙ
 async def send_long_message(target, text: str):
     if len(text) <= MAX_MESSAGE_LENGTH:
         await target.edit_text(text, parse_mode="HTML")
@@ -465,81 +649,27 @@ async def send_long_message(target, text: str):
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
 
-# 12. ТОКЕНЫ ДЛЯ ИГРЫ
+# 11. ТОКЕНЫ
 def generate_game_token(user_id: int, user_name: str) -> str:
-    """Генерируем подписанный токен с данными игрока и временем создания"""
-    payload = {
-        "user_id": user_id,
-        "user_name": user_name,
-        "ts": int(time.time())
-    }
-    payload_json = json.dumps(payload, ensure_ascii=False)
-    payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode()
-    signature = hmac.new(
-        TOKEN.encode(),
-        payload_b64.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return f"{payload_b64}.{signature}"
+    payload = {"user_id": user_id, "user_name": user_name, "ts": int(time.time())}
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
+    sig = hmac.new(TOKEN.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
 
 def verify_game_token(token: str) -> dict | None:
-    """Проверяем токен — возвращаем данные игрока или None если токен недействителен"""
     try:
-        payload_b64, signature = token.rsplit(".", 1)
-        expected = hmac.new(
-            TOKEN.encode(),
-            payload_b64.encode(),
-            hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            print("Неверная подпись токена")
+        payload_b64, sig = token.rsplit(".", 1)
+        expected = hmac.new(TOKEN.encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
             return None
         payload = json.loads(base64.urlsafe_b64decode(payload_b64).decode())
-        age = int(time.time()) - payload.get("ts", 0)
-        if age > TOKEN_TTL:
-            print(f"Токен просрочен: {age} сек")
+        if int(time.time()) - payload.get("ts", 0) > TOKEN_TTL:
             return None
         return payload
-    except Exception as e:
-        print(f"Ошибка проверки токена: {e}")
+    except Exception:
         return None
 
-# 13. ВЕБ-СЕРВЕР — ЭНДПОИНТЫ
-async def handle_result(request):
-    """Принимает результат игры от страницы и записывает в БД"""
-    try:
-        data = await request.json()
-        token = data.get("token", "")
-        won = data.get("won")
-
-        payload = verify_game_token(token)
-        if not payload:
-            return web.json_response({"error": "Unauthorized"}, status=401)
-
-        if won is None:
-            return web.json_response({"error": "Missing fields"}, status=400)
-
-        user_id = payload["user_id"]
-        user_name = payload["user_name"]
-
-        update_peepee_score(ALLOWED_CHAT_ID, int(user_id), user_name, bool(won))
-        print(f"Результат записан: {user_name} — {'победа' if won else 'поражение'}")
-        return web.json_response({"ok": True, "user_name": user_name})
-    except Exception as e:
-        print(f"Ошибка handle_result: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-async def handle_scores(request):
-    """Отдаёт таблицу лидеров для страницы игры"""
-    try:
-        rows = get_peepee_scores(ALLOWED_CHAT_ID)
-        scores = [{"name": r[0], "wins": r[1], "losses": r[2]} for r in rows]
-        return web.json_response({"scores": scores})
-    except Exception as e:
-        print(f"Ошибка handle_scores: {e}")
-        return web.json_response({"error": str(e)}, status=500)
-
-# 14. CORS — разрешаем запросы с GitHub Pages
+# 12. ВЕБ — CORS
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
@@ -550,6 +680,92 @@ async def cors_middleware(request, handler):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
+
+# 13. ВЕБ — ЭНДПОИНТЫ ИГРЫ В ПИСЮН
+async def handle_result(request):
+    try:
+        data = await request.json()
+        payload = verify_game_token(data.get("token", ""))
+        if not payload:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        won = data.get("won")
+        if won is None:
+            return web.json_response({"error": "Missing fields"}, status=400)
+        update_peepee_score(ALLOWED_CHAT_ID, int(payload["user_id"]), payload["user_name"], bool(won))
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def handle_scores(request):
+    try:
+        rows = get_peepee_scores(ALLOWED_CHAT_ID)
+        scores = [{"name": r[0], "wins": r[1], "losses": r[2]} for r in rows]
+        return web.json_response({"scores": scores})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+# 14. ВЕБ — ЭНДПОИНТЫ КАЗИНО
+async def handle_casino_spin(request):
+    try:
+        data = await request.json()
+        payload = verify_game_token(data.get("token", ""))
+        if not payload:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        bet = int(data.get("bet", 10))
+        if bet not in [10, 50, 100, 500]:
+            return web.json_response({"error": "Invalid bet"}, status=400)
+
+        user_id = int(payload["user_id"])
+        user_name = payload["user_name"]
+
+        # Убедимся что игрок есть в БД
+        get_or_create_casino_balance(ALLOWED_CHAT_ID, user_id, user_name)
+
+        # Крутим барабаны
+        result = spin_slots(bet)
+        delta = result["delta"]
+
+        # Обновляем баланс
+        new_balance = update_casino_balance(ALLOWED_CHAT_ID, user_id, delta)
+
+        # Генерируем комментарий
+        comment = get_casino_comment(user_name, result["result_type"], delta, new_balance)
+
+        return web.json_response({
+            "ok": True,
+            "symbols": result["symbols"],
+            "multiplier": result["multiplier"],
+            "winnings": result["winnings"],
+            "delta": delta,
+            "result_type": result["result_type"],
+            "new_balance": new_balance,
+            "comment": comment,
+        })
+    except Exception as e:
+        print(f"Ошибка casino_spin: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+async def handle_casino_leaderboard(request):
+    try:
+        rows = get_casino_leaderboard(ALLOWED_CHAT_ID)
+        board = [{"name": r[0], "balance": r[1]} for r in rows]
+        return web.json_response({"board": board})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def handle_casino_balance(request):
+    try:
+        token = request.rel_url.query.get("token", "")
+        payload = verify_game_token(token)
+        if not payload:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        user_id = int(payload["user_id"])
+        user_name = payload["user_name"]
+        balance = get_or_create_casino_balance(ALLOWED_CHAT_ID, user_id, user_name)
+        return web.json_response({"balance": balance, "user_name": user_name})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 # 15. КОМАНДЫ БОТА
 @dp.message(Command("id"))
@@ -570,6 +786,7 @@ async def cmd_help(message: types.Message):
         "🎮 /game — найди писюн\n"
         "🍆 /peepee — рейтинг охотников\n"
         "📊 /mypeepee — твоя статистика\n\n"
+        "🎰 /casino — слоты (стартовые $1000)\n\n"
         "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
         "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
         "👉 <b>Даяна кто виноват</b> — назначить виноватого"
@@ -580,162 +797,138 @@ async def cmd_help(message: types.Message):
 async def cmd_game(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
-
     user = message.from_user
     if not user:
         return
-
-    user_id = user.id
     user_name = user.full_name or user.username or "Анон"
-
-    token = generate_game_token(user_id, user_name)
-    game_link = f"{GAME_URL}?token={token}"
-
+    token = generate_game_token(user.id, user_name)
     keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
         types.InlineKeyboardButton(
             text=f"🎮 Играть — ссылка для {user_name}",
-            url=game_link
+            url=f"{GAME_URL}?token={token}"
         )
     ]])
     await message.answer(
         f"🍆 <b>{user_name}</b>, найди писюн!\n"
         f"<i>Ссылка действует 5 минут — только для тебя</i>",
-        reply_markup=keyboard,
-        parse_mode="HTML"
+        reply_markup=keyboard, parse_mode="HTML"
+    )
+
+@dp.message(Command("casino"))
+async def cmd_casino(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+        return
+    user = message.from_user
+    if not user:
+        return
+    user_name = user.full_name or user.username or "Анон"
+    token = generate_game_token(user.id, user_name)
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(
+            text=f"🎰 Играть — ссылка для {user_name}",
+            url=f"{CASINO_URL}?token={token}"
+        )
+    ]])
+    await message.answer(
+        f"🎰 <b>{user_name}</b>, добро пожаловать в казино!\n"
+        f"<i>Стартовый баланс $1000. Удачи — она тебе понадобится.</i>\n"
+        f"<i>Ссылка действует 5 минут — только для тебя</i>",
+        reply_markup=keyboard, parse_mode="HTML"
     )
 
 @dp.message(Command("peepee"))
 async def cmd_peepee(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
-
     rows = get_peepee_scores(message.chat.id)
-
     if not rows:
         await message.answer("Ещё никто не играл. Введи /game и начни позориться!")
         return
-
     medals = ["🥇", "🥈", "🥉"]
     text = "<b>🍆 Рейтинг охотников за писюном:</b>\n\n"
-
     for i, (name, wins, losses) in enumerate(rows):
         total = wins + losses
         pct = int((wins / total) * 100) if total > 0 else 0
-        if i < 3:
-            medal = medals[i]
-        elif i == len(rows) - 1 and len(rows) > 3:
-            medal = "💩"
-        else:
-            medal = "▪️"
+        if i < 3: medal = medals[i]
+        elif i == len(rows) - 1 and len(rows) > 3: medal = "💩"
+        else: medal = "▪️"
         text += f"{medal} {name} — {wins} нашёл / {losses} мимо ({pct}%)\n"
-
     if len(rows) > 1:
-        loser = rows[-1]
-        text += f"\n🤡 Главный мимострел: <b>{loser[0]}</b>"
-
+        text += f"\n🤡 Главный мимострел: <b>{rows[-1][0]}</b>"
     await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("mypeepee"))
 async def cmd_mypeepee(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
-
     user_id = message.from_user.id
     name = message.from_user.first_name or "Анон"
-
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('''
-                SELECT wins, losses FROM peepee_scores
-                WHERE chat_id = %s AND user_id = %s
-            ''', (message.chat.id, user_id))
+            cursor.execute('SELECT wins, losses FROM peepee_scores WHERE chat_id = %s AND user_id = %s',
+                           (message.chat.id, user_id))
             row = cursor.fetchone()
     finally:
         release_conn(conn)
-
     if not row:
         await message.answer(f"{name}, ты ещё не играл. Введи /game!")
         return
-
     wins, losses = row
     total = wins + losses
     pct = int((wins / total) * 100) if total > 0 else 0
-
-    if pct >= 60:
-        verdict = "Настоящий охотник 🏆"
-    elif pct >= 40:
-        verdict = "Так себе, но бывает 🤷"
-    else:
-        verdict = "Позор семьи 💩"
-
-    text = (
-        f"🍆 <b>Статистика {name}:</b>\n\n"
-        f"Нашёл: {wins}\n"
-        f"Промазал: {losses}\n"
-        f"Точность: {pct}%\n\n"
-        f"Вердикт: {verdict}"
+    if pct >= 60: verdict = "Настоящий охотник 🏆"
+    elif pct >= 40: verdict = "Так себе, но бывает 🤷"
+    else: verdict = "Позор семьи 💩"
+    await message.answer(
+        f"🍆 <b>Статистика {name}:</b>\n\nНашёл: {wins}\nПромазал: {losses}\nТочность: {pct}%\n\nВердикт: {verdict}",
+        parse_mode="HTML"
     )
-    await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("summary"))
 async def cmd_summary(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         await message.answer("Ты кто такой? Я тебя не знаю. Проваливай из моего контекста! 🖕")
         return
-
     args = message.text.split()
     hours = 1
-
     if len(args) > 1:
         if args[1].isdigit():
             hours = int(args[1])
-            if hours < 1:
-                hours = 1
+            if hours < 1: hours = 1
             elif hours > 48:
                 await message.answer("⚠️ Максимум — 48 часов. Не жадничай.")
                 return
         else:
             await message.answer("⚠️ Используй число. Например: /summary 3")
             return
-
     status_msg = await message.answer(f"⏳ Читаю ваш бред за последние {hours} ч...")
-
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                SELECT user_name, message_text, timestamp 
-                FROM history 
-                WHERE chat_id = %s 
-                AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+                SELECT user_name, message_text, timestamp FROM history
+                WHERE chat_id = %s AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
                 ORDER BY timestamp ASC
             ''', (message.chat.id, hours))
             all_rows = cursor.fetchall()
     except Exception as e:
         await status_msg.edit_text("Ошибка при чтении базы данных. Попробуй ещё раз.")
-        print(f"Ошибка запроса к БД: {e}")
         return
     finally:
         release_conn(conn)
-
     if not all_rows:
         await status_msg.edit_text("За это время сообщений нет. Либо вы спите, либо я сломался.")
         return
-
-    formatted_chat = build_prompt_text(all_rows)
-
     try:
-        raw_summary = get_ai_summary(formatted_chat, f"{hours} ч.", len(all_rows))
+        raw_summary = get_ai_summary(build_prompt_text(all_rows), f"{hours} ч.", len(all_rows))
         safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         full_text = f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}"
-
         dayana_questions = get_dayana_questions(message.chat.id, hours)
         if dayana_questions:
             dayana_comments = get_dayana_block(dayana_questions)
             safe_dayana = dayana_comments.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             full_text += f"\n\n<b>🔮 КАК ВЫ МУЧАЛИ МОЮ ПОДРУГУ ДАЯНУ:</b>\n\n{safe_dayana}"
-
         await send_long_message(status_msg, full_text)
     except Exception as e:
         print(f"Ошибка AI: {e}")
@@ -746,7 +939,6 @@ async def cmd_summary(message: types.Message):
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
-
     if message.sender_chat:
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
     elif message.from_user:
@@ -755,10 +947,8 @@ async def collect_messages(message: types.Message):
         author = message.from_user.full_name or message.from_user.username or "Аноним"
     else:
         return
-
     if message.text:
         text_lower = message.text.lower()
-
         if "даяна" in text_lower and "ответь" in text_lower:
             try:
                 idx = text_lower.index("ответь") + len("ответь")
@@ -771,67 +961,41 @@ async def collect_messages(message: types.Message):
                 safe_answer = answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
             except Exception as e:
-                print(f"Ошибка Даяны (ответь): {e}")
                 await message.reply("Не могу ответить прямо сейчас.")
             return
-
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
                 rows = get_last_messages(message.chat.id, limit=20)
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
-                context = format_context(rows)
-                verdict = dayana_judge(context)
+                verdict = dayana_judge(format_context(rows))
                 safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>⚖️ Даяна:</b>\n\n{safe_verdict}", parse_mode="HTML")
-            except Exception as e:
-                print(f"Ошибка Даяны (рассуди): {e}")
+            except Exception:
                 await message.reply("Не могу рассудить прямо сейчас.")
             return
-
         if "даяна" in text_lower and "виноват" in text_lower:
             try:
                 rows = get_last_messages(message.chat.id, limit=10)
                 if not rows:
                     await message.reply("Не в чем разбираться — чат пустой.")
                     return
-                context = format_context(rows)
-                guilty = dayana_guilty(context)
+                guilty = dayana_guilty(format_context(rows))
                 safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>👉 Даяна:</b>\n\n{safe_guilty}", parse_mode="HTML")
-            except Exception as e:
-                print(f"Ошибка Даяны (виноват): {e}")
+            except Exception:
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
-
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
-
     elif message.voice:
-        text = await transcribe_audio(
-            message.voice.file_id,
-            "voice.ogg",
-            message.voice.file_size or 0
-        )
-        if text:
-            save_message(message.chat.id, author, f"[🎤 Голосовое]: {text}")
-            print(f"[{author}] 🎤: {text}")
-        else:
-            save_message(message.chat.id, author, "[🎤 Голосовое]: не удалось распознать")
-
+        text = await transcribe_audio(message.voice.file_id, "voice.ogg", message.voice.file_size or 0)
+        save_message(message.chat.id, author, f"[🎤 Голосовое]: {text}" if text else "[🎤 Голосовое]: не удалось распознать")
     elif message.video_note:
-        text = await transcribe_audio(
-            message.video_note.file_id,
-            "video_note.mp4",
-            message.video_note.file_size or 0
-        )
-        if text:
-            save_message(message.chat.id, author, f"[📹 Кружочек]: {text}")
-            print(f"[{author}] 📹: {text}")
-        else:
-            save_message(message.chat.id, author, "[📹 Кружочек]: не удалось распознать")
+        text = await transcribe_audio(message.video_note.file_id, "video_note.mp4", message.video_note.file_size or 0)
+        save_message(message.chat.id, author, f"[📹 Кружочек]: {text}" if text else "[📹 Кружочек]: не удалось распознать")
 
 async def main():
     init_db_pool()
@@ -842,8 +1006,11 @@ async def main():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/result", handle_result)
     app.router.add_get("/scores", handle_scores)
-    app.router.add_route("OPTIONS", "/result", lambda r: web.Response())
-    app.router.add_route("OPTIONS", "/scores", lambda r: web.Response())
+    app.router.add_post("/casino/spin", handle_casino_spin)
+    app.router.add_get("/casino/leaderboard", handle_casino_leaderboard)
+    app.router.add_get("/casino/balance", handle_casino_balance)
+    for path in ["/result", "/scores", "/casino/spin", "/casino/leaderboard", "/casino/balance"]:
+        app.router.add_route("OPTIONS", path, lambda r: web.Response())
 
     runner = web.AppRunner(app)
     await runner.setup()
