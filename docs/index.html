@@ -1,2 +1,540 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Найди писюн</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;700;900&family=Onest:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d0d0f;
+    --surface: #16161a;
+    --surface2: #1e1e24;
+    --border: #2a2a35;
+    --accent: #ff4d6d;
+    --accent2: #ff8fa3;
+    --gold: #ffd60a;
+    --silver: #c0c0c0;
+    --bronze: #cd7f32;
+    --green: #2ecc71;
+    --text: #f0f0f5;
+    --muted: #6b6b80;
+    --radius: 16px;
+  }
 
-<h1>Работает!</h1>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Onest', sans-serif;
+  }
+
+  /* ─── LAYOUT ─── */
+  .app {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    padding: clamp(10px, 3vw, 20px);
+    gap: clamp(8px, 2vw, 14px);
+    max-width: 480px;
+    margin: 0 auto;
+  }
+
+  /* ─── HEADER ─── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .logo {
+    font-family: 'Unbounded', sans-serif;
+    font-size: clamp(14px, 4vw, 20px);
+    font-weight: 900;
+    letter-spacing: -0.5px;
+    background: linear-gradient(135deg, var(--accent), var(--gold));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .player-badge {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 30px;
+    padding: 6px 14px;
+    font-size: clamp(11px, 3vw, 13px);
+    font-weight: 600;
+    color: var(--accent2);
+    white-space: nowrap;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* ─── RESULT BANNER ─── */
+  .result-banner {
+    flex-shrink: 0;
+    border-radius: var(--radius);
+    padding: clamp(10px, 2.5vw, 14px) clamp(14px, 3vw, 20px);
+    text-align: center;
+    font-size: clamp(13px, 3.5vw, 15px);
+    font-weight: 600;
+    opacity: 0;
+    transform: translateY(-8px);
+    transition: all 0.35s cubic-bezier(.34,1.56,.64,1);
+    pointer-events: none;
+    line-height: 1.4;
+  }
+  .result-banner.show {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+  .result-banner.win {
+    background: linear-gradient(135deg, rgba(46,204,113,0.15), rgba(46,204,113,0.05));
+    border: 1px solid rgba(46,204,113,0.4);
+    color: #2ecc71;
+  }
+  .result-banner.lose {
+    background: linear-gradient(135deg, rgba(255,77,109,0.15), rgba(255,77,109,0.05));
+    border: 1px solid rgba(255,77,109,0.4);
+    color: var(--accent);
+  }
+
+  /* ─── GRID SECTION ─── */
+  .game-section {
+    flex-shrink: 0;
+  }
+  .grid-wrap {
+    aspect-ratio: 1;
+    width: 100%;
+    max-width: min(360px, 70dvh);
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: clamp(8px, 2vw, 12px);
+  }
+
+  .box {
+    aspect-ratio: 1;
+    border-radius: clamp(12px, 3vw, 18px);
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: clamp(28px, 8vw, 44px);
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    position: relative;
+    overflow: hidden;
+    user-select: none;
+  }
+  .box::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(255,255,255,0.04), transparent);
+    border-radius: inherit;
+  }
+  .box:hover:not(.done) {
+    transform: scale(1.05);
+    border-color: var(--accent);
+    background: var(--surface2);
+  }
+  .box:active:not(.done) {
+    transform: scale(0.95);
+  }
+  .box.done { cursor: default; }
+  .box.winner {
+    background: linear-gradient(135deg, rgba(255,214,10,0.2), rgba(255,214,10,0.05));
+    border-color: var(--gold);
+    animation: pulse-win 0.6s ease;
+  }
+  .box.loser {
+    background: linear-gradient(135deg, rgba(255,77,109,0.15), rgba(255,77,109,0.05));
+    border-color: var(--accent);
+    animation: shake 0.4s ease;
+  }
+  .box.neutral.done { opacity: 0.35; }
+
+  @keyframes pulse-win {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.12); }
+    70% { transform: scale(0.96); }
+    100% { transform: scale(1); }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    60% { transform: translateX(6px); }
+  }
+
+  /* ─── PLAY AGAIN ─── */
+  .play-again {
+    display: none;
+    width: 100%;
+    max-width: min(360px, 70dvh);
+    margin: 0 auto;
+    margin-top: clamp(8px, 2vw, 12px);
+    padding: clamp(12px, 3vw, 16px);
+    border-radius: var(--radius);
+    background: linear-gradient(135deg, var(--accent), #c9184a);
+    border: none;
+    color: #fff;
+    font-family: 'Unbounded', sans-serif;
+    font-size: clamp(13px, 3.5vw, 15px);
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+    letter-spacing: 0.3px;
+  }
+  .play-again:hover { opacity: 0.9; transform: scale(1.02); }
+  .play-again:active { transform: scale(0.97); }
+  .play-again.show { display: block; }
+
+  /* ─── LEADERBOARD ─── */
+  .leaderboard {
+    flex: 1;
+    min-height: 0;
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .lb-header {
+    padding: clamp(10px, 2.5vw, 14px) clamp(14px, 3vw, 18px);
+    border-bottom: 1px solid var(--border);
+    font-family: 'Unbounded', sans-serif;
+    font-size: clamp(11px, 2.8vw, 13px);
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+  .lb-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: clamp(6px, 1.5vw, 10px);
+    scrollbar-width: none;
+  }
+  .lb-list::-webkit-scrollbar { display: none; }
+
+  .lb-row {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: clamp(7px, 2vw, 10px) clamp(8px, 2vw, 12px);
+    border-radius: 10px;
+    transition: background 0.15s;
+  }
+  .lb-row:hover { background: var(--surface2); }
+  .lb-row.me {
+    background: linear-gradient(135deg, rgba(255,77,109,0.1), rgba(255,77,109,0.03));
+    border: 1px solid rgba(255,77,109,0.2);
+  }
+
+  .lb-rank {
+    font-family: 'Unbounded', sans-serif;
+    font-size: clamp(11px, 2.8vw, 13px);
+    font-weight: 700;
+    text-align: center;
+  }
+  .lb-name {
+    font-size: clamp(12px, 3vw, 14px);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lb-name.me-label { color: var(--accent2); }
+  .lb-stats {
+    font-size: clamp(11px, 2.8vw, 13px);
+    color: var(--muted);
+    font-weight: 500;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .lb-pct {
+    font-size: clamp(10px, 2.5vw, 11px);
+    color: var(--muted);
+    margin-left: 4px;
+  }
+
+  .lb-empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 20px;
+    font-size: 13px;
+  }
+
+  /* ─── EXPIRED ─── */
+  .expired-screen {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100dvh;
+    text-align: center;
+    padding: 30px;
+    gap: 16px;
+  }
+  .expired-screen.show { display: flex; }
+  .expired-emoji { font-size: 64px; }
+  .expired-title {
+    font-family: 'Unbounded', sans-serif;
+    font-size: 22px;
+    font-weight: 900;
+    color: var(--accent);
+  }
+  .expired-sub { color: var(--muted); font-size: 15px; line-height: 1.5; }
+
+  /* ─── LOADING ─── */
+  .loading-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100dvh;
+    gap: 14px;
+  }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { color: var(--muted); font-size: 14px; }
+
+  /* ─── ANIMATIONS ─── */
+  .app { animation: fadeIn 0.4s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+
+<!-- LOADING -->
+<div class="loading-screen" id="loadingScreen">
+  <div class="spinner"></div>
+  <div class="loading-text">Загружаем игру...</div>
+</div>
+
+<!-- EXPIRED TOKEN -->
+<div class="expired-screen" id="expiredScreen">
+  <div class="expired-emoji">⏱️</div>
+  <div class="expired-title">Ссылка устарела</div>
+  <div class="expired-sub">Напиши /game в чате<br>и получи новую ссылку</div>
+</div>
+
+<!-- MAIN APP -->
+<div class="app" id="mainApp" style="display:none;">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">🍆 Найди писюн</div>
+    <div class="player-badge" id="playerBadge">—</div>
+  </div>
+
+  <!-- Result -->
+  <div class="result-banner" id="resultBanner"></div>
+
+  <!-- Grid -->
+  <div class="game-section">
+    <div class="grid-wrap" id="grid"></div>
+    <button class="play-again" id="playAgainBtn" onclick="resetGame()">Сыграть ещё раз → /game</button>
+  </div>
+
+  <!-- Leaderboard -->
+  <div class="leaderboard">
+    <div class="lb-header">🏆 Таблица лидеров</div>
+    <div class="lb-list" id="lbList">
+      <div class="lb-empty">Загружаем рейтинг...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const RAILWAY_URL = "https://summarybot-production-0954.up.railway.app";
+  const MEDALS = ["🥇","🥈","🥉"];
+  const POOP = "💩";
+
+  let playerName = null;
+  let playerToken = null;
+  let gameOver = false;
+  let winnerPos = null;
+
+  // ─── INIT ───
+  window.addEventListener('load', async () => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+
+    if (!token) {
+      showExpired();
+      return;
+    }
+
+    // Декодируем payload (без проверки — проверка на сервере)
+    try {
+      const b64 = token.split(".")[0];
+      const payload = JSON.parse(atob(b64.replace(/-/g,'+').replace(/_/g,'/')));
+      const age = Math.floor(Date.now() / 1000) - payload.ts;
+      if (age > 300) { showExpired(); return; }
+      playerName = payload.user_name;
+      playerToken = token;
+    } catch(e) {
+      showExpired();
+      return;
+    }
+
+    // Показываем приложение
+    document.getElementById("loadingScreen").style.display = "none";
+    document.getElementById("mainApp").style.display = "flex";
+    document.getElementById("playerBadge").textContent = playerName;
+
+    buildGrid();
+    await loadScores();
+  });
+
+  // ─── BUILD GRID ───
+  function buildGrid() {
+    gameOver = false;
+    winnerPos = Math.floor(Math.random() * 9);
+    const grid = document.getElementById("grid");
+    grid.innerHTML = "";
+
+    for (let i = 0; i < 9; i++) {
+      const box = document.createElement("div");
+      box.className = "box";
+      box.textContent = "📦";
+      box.dataset.index = i;
+      box.addEventListener("click", () => handleClick(i));
+      grid.appendChild(box);
+    }
+  }
+
+  // ─── HANDLE CLICK ───
+  async function handleClick(chosen) {
+    if (gameOver) return;
+    gameOver = true;
+
+    const won = chosen === winnerPos;
+    const boxes = document.querySelectorAll(".box");
+
+    boxes.forEach((box, i) => {
+      box.classList.add("done");
+      if (i === winnerPos) {
+        box.textContent = "🍆";
+        box.classList.add("winner");
+      } else if (i === chosen && !won) {
+        box.textContent = "💨";
+        box.classList.add("loser");
+      } else {
+        box.classList.add("neutral");
+      }
+    });
+
+    showResult(won, chosen);
+    document.getElementById("playAgainBtn").classList.add("show");
+
+    // Отправляем результат на сервер
+    try {
+      await fetch(`${RAILWAY_URL}/result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: playerToken, won })
+      });
+      await loadScores();
+    } catch(e) {
+      console.error("Ошибка отправки результата:", e);
+    }
+  }
+
+  // ─── RESULT BANNER ───
+  const WIN_TEXTS = [
+    "Нашёл! Везёт тебе 🍆",
+    "Красавчик, нашёл с первого раза!",
+    "Та-дааам! Писюн найден 🎉",
+    "Ловкие руки — не пропьёшь 🏆",
+  ];
+  const LOSE_TEXTS = [
+    "Мимо! Писюн был в другом месте 💨",
+    "Промазал. Бывает, не расстраивайся",
+    "Ха! Не угадал. Попробуй ещё раз",
+    "Руки не из того места? Давай ещё раз 💩",
+  ];
+
+  function showResult(won, chosen) {
+    const banner = document.getElementById("resultBanner");
+    banner.className = `result-banner ${won ? 'win' : 'lose'} show`;
+    const texts = won ? WIN_TEXTS : LOSE_TEXTS;
+    banner.textContent = texts[Math.floor(Math.random() * texts.length)];
+  }
+
+  // ─── RESET ───
+  function resetGame() {
+    const banner = document.getElementById("resultBanner");
+    banner.className = "result-banner";
+    document.getElementById("playAgainBtn").classList.remove("show");
+    // Кнопка просто напоминает написать /game — игра уже привязана к токену
+  }
+
+  // ─── SCORES ───
+  async function loadScores() {
+    try {
+      const res = await fetch(`${RAILWAY_URL}/scores`);
+      const data = await res.json();
+      renderScores(data.scores || []);
+    } catch(e) {
+      document.getElementById("lbList").innerHTML =
+        '<div class="lb-empty">Не удалось загрузить рейтинг</div>';
+    }
+  }
+
+  function renderScores(scores) {
+    const list = document.getElementById("lbList");
+    if (!scores.length) {
+      list.innerHTML = '<div class="lb-empty">Ещё никто не играл 👀</div>';
+      return;
+    }
+
+    list.innerHTML = scores.map((s, i) => {
+      const total = s.wins + s.losses;
+      const pct = total ? Math.round((s.wins / total) * 100) : 0;
+      const isMe = s.name === playerName;
+
+      let rank;
+      if (i < 3) rank = MEDALS[i];
+      else if (i === scores.length - 1 && scores.length > 3) rank = POOP;
+      else rank = `<span style="color:var(--muted);font-size:12px">${i+1}</span>`;
+
+      return `
+        <div class="lb-row ${isMe ? 'me' : ''}">
+          <div class="lb-rank">${rank}</div>
+          <div class="lb-name ${isMe ? 'me-label' : ''}">${escHtml(s.name)}${isMe ? ' 👈' : ''}</div>
+          <div class="lb-stats">${s.wins}🍆 ${s.losses}💨<span class="lb-pct">${pct}%</span></div>
+        </div>`;
+    }).join('');
+  }
+
+  function escHtml(str) {
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function showExpired() {
+    document.getElementById("loadingScreen").style.display = "none";
+    document.getElementById("expiredScreen").classList.add("show");
+  }
+</script>
+</body>
+</html>
