@@ -264,53 +264,56 @@ SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
 def spin_slots(bet: int) -> dict:
     """
-    Вероятности:
-      55% — все разные (проигрыш, x0)
-      25% — два одинаковых (x1.5)
-      10% — 🍒🍒🍒 (x3)
-       5% — 🍋🍋🍋 (x5)
-       3% — 7️⃣7️⃣7️⃣ (x15)
-     1.5% — 💎💎💎 (x10)
-     0.5% — 🍆🍆🍆 (x20, джекпот)
+    Новые вероятности — казино жёстче:
+      75%  — все разные (проигрыш, x0)
+      15%  — два одинаковых (x1.2) — едва отбиваешь
+       6%  — 🍒🍒🍒 (x2.5)
+      2.5% — 🍋🍋🍋 (x4)
+       1%  — 7️⃣7️⃣7️⃣ (x12)
+      0.4% — 💎💎💎 (x8)
+      0.1% — 🍆🍆🍆 (x20, джекпот)
+    Матожидание ~0.65$ на каждый вложенный доллар. Казино забирает 35%.
     """
     r = random.random()
-
-    if r < 0.55:
+ 
+    if r < 0.75:
         symbols = random.sample(SLOT_SYMBOLS, 3)
         multiplier = 0
         result_type = "lose"
-    elif r < 0.80:
+    elif r < 0.90:
         sym = random.choice(SLOT_SYMBOLS)
         others = [s for s in SLOT_SYMBOLS if s != sym]
         third = random.choice(others)
-        pos = random.sample([0, 1, 2], 2)
+        positions = [0, 1, 2]
+        match_pos = random.sample(positions, 2)
         symbols = [third, third, third]
-        symbols[pos[0]] = sym
-        symbols[pos[1]] = sym
-        symbols[2 if 2 not in pos else (1 if 1 not in pos else 0)] = third
-        multiplier = 1.5
+        symbols[match_pos[0]] = sym
+        symbols[match_pos[1]] = sym
+        remaining = [p for p in positions if p not in match_pos][0]
+        symbols[remaining] = third
+        multiplier = 1.2
         result_type = "pair"
-    elif r < 0.90:
+    elif r < 0.96:
         symbols = ['🍒', '🍒', '🍒']
-        multiplier = 3
+        multiplier = 2.5
         result_type = "win"
-    elif r < 0.95:
+    elif r < 0.985:
         symbols = ['🍋', '🍋', '🍋']
-        multiplier = 5
+        multiplier = 4
         result_type = "win"
-    elif r < 0.98:
-        symbols = ['7️⃣', '7️⃣', '7️⃣']
-        multiplier = 15
-        result_type = "bigwin"
     elif r < 0.995:
+        symbols = ['7️⃣', '7️⃣', '7️⃣']
+        multiplier = 12
+        result_type = "bigwin"
+    elif r < 0.999:
         symbols = ['💎', '💎', '💎']
-        multiplier = 10
+        multiplier = 8
         result_type = "bigwin"
     else:
         symbols = ['🍆', '🍆', '🍆']
         multiplier = 20
         result_type = "jackpot"
-
+ 
     winnings = int(bet * multiplier)
     delta = winnings - bet
     return {
