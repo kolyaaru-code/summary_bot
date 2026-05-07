@@ -968,7 +968,7 @@ async def collect_messages(message: types.Message):
             return
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
-                rows = get_last_messages(message.chat.id, limit=80)
+                rows = get_last_messages(message.chat.id, limit=40)
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
