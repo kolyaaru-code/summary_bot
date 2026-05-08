@@ -286,24 +286,18 @@ def get_casino_leaderboard(chat_id: int) -> list:
 SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
 def spin_slots(bet: int) -> dict:
-    """
-    Вероятности — казино жёстче:
-      75%  — все разные (проигрыш, x0)
-      15%  — два одинаковых (x1.2)
-       6%  — 🍒🍒🍒 (x2.5)
-      2.5% — 🍋🍋🍋 (x4)
-       1%  — 7️⃣7️⃣7️⃣ (x12)
-      0.4% — 💎💎💎 (x8)
-      0.1% — 🍆🍆🍆 (x20, джекпот)
-    Матожидание ~0.65$ на каждый вложенный доллар.
-    """
+    """РЕЖИМ ТЕСТИРОВАНИЯ — все выигрывают"""
     r = random.random()
 
-    if r < 0.75:
-        symbols = random.sample(SLOT_SYMBOLS, 3)
-        multiplier = 0
-        result_type = "lose"
-    elif r < 0.90:
+    if r < 0.30:
+        symbols = ['🍒', '🍒', '🍒']
+        multiplier = 2.5
+        result_type = "win"
+    elif r < 0.55:
+        symbols = ['🍋', '🍋', '🍋']
+        multiplier = 4
+        result_type = "win"
+    elif r < 0.75:
         sym = random.choice(SLOT_SYMBOLS)
         others = [s for s in SLOT_SYMBOLS if s != sym]
         third = random.choice(others)
@@ -314,21 +308,13 @@ def spin_slots(bet: int) -> dict:
         symbols[match_pos[1]] = sym
         remaining = [p for p in positions if p not in match_pos][0]
         symbols[remaining] = third
-        multiplier = 1.2
+        multiplier = 1.5
         result_type = "pair"
-    elif r < 0.96:
-        symbols = ['🍒', '🍒', '🍒']
-        multiplier = 2.5
-        result_type = "win"
-    elif r < 0.985:
-        symbols = ['🍋', '🍋', '🍋']
-        multiplier = 4
-        result_type = "win"
-    elif r < 0.995:
+    elif r < 0.90:
         symbols = ['7️⃣', '7️⃣', '7️⃣']
         multiplier = 12
         result_type = "bigwin"
-    elif r < 0.999:
+    elif r < 0.98:
         symbols = ['💎', '💎', '💎']
         multiplier = 8
         result_type = "bigwin"
