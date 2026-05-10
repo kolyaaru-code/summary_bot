@@ -33,10 +33,19 @@ MAX_MESSAGE_LENGTH = 4000
 MAX_TEXT_LENGTH = 4000
 MAX_PROMPT_CHARS = 9000
 
+# Настройки игры "Я никогда не"
+NEVER_JOIN_TIMEOUT = 45    # секунд на сбор игроков после первого нажатия
+NEVER_VOTE_TIMEOUT = 25    # секунд на голосование за раунд
+NEVER_ROUNDS = 6           # раундов в игре
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 client = Groq(api_key=GROQ_KEY)
 client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))
+
+# Состояния игр "Я никогда не" — хранятся в памяти
+# chat_id -> game state dict
+never_games: dict = {}
 
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
@@ -99,7 +108,7 @@ def save_message(chat_id, user_name, text):
             )
         conn.commit()
     except Exception as e:
-        print(f"Ошибка сохранения сообщения в БД: {e}")
+        print(f"Ошибка сохранения сообщения: {e}")
         conn.rollback()
     finally:
         release_conn(conn)
@@ -125,12 +134,9 @@ def get_dayana_questions(chat_id: int, hours: int) -> list:
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                SELECT user_name, question
-                FROM dayana_questions
-                WHERE chat_id = %s
-                AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
-                ORDER BY RANDOM()
-                LIMIT 3
+                SELECT user_name, question FROM dayana_questions
+                WHERE chat_id = %s AND timestamp >= NOW() - (%s * INTERVAL '1 hour')
+                ORDER BY RANDOM() LIMIT 3
             ''', (chat_id, hours))
             return cursor.fetchall()
     finally:
@@ -141,34 +147,23 @@ def get_last_messages(chat_id: int, limit: int = 10) -> list:
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                SELECT user_name, message_text, timestamp
-                FROM history
-                WHERE chat_id = %s
-                ORDER BY timestamp DESC
-                LIMIT %s
+                SELECT user_name, message_text, timestamp FROM history
+                WHERE chat_id = %s ORDER BY timestamp DESC LIMIT %s
             ''', (chat_id, limit))
-            rows = cursor.fetchall()
-            return list(reversed(rows))
+            return list(reversed(cursor.fetchall()))
     finally:
         release_conn(conn)
 
 def get_messages_around_timestamp(chat_id: int, anchor_ts, before: int = 15, after: int = 8) -> list:
-    """Берём сообщения вокруг конкретного timestamp — якоря из reply"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                (SELECT user_name, message_text, timestamp
-                 FROM history
-                 WHERE chat_id = %s AND timestamp <= %s
-                 ORDER BY timestamp DESC
-                 LIMIT %s)
+                (SELECT user_name, message_text, timestamp FROM history
+                 WHERE chat_id = %s AND timestamp <= %s ORDER BY timestamp DESC LIMIT %s)
                 UNION ALL
-                (SELECT user_name, message_text, timestamp
-                 FROM history
-                 WHERE chat_id = %s AND timestamp > %s
-                 ORDER BY timestamp ASC
-                 LIMIT %s)
+                (SELECT user_name, message_text, timestamp FROM history
+                 WHERE chat_id = %s AND timestamp > %s ORDER BY timestamp ASC LIMIT %s)
                 ORDER BY timestamp ASC
             ''', (chat_id, anchor_ts, before, chat_id, anchor_ts, after))
             return cursor.fetchall()
@@ -201,11 +196,9 @@ def update_peepee_score(chat_id: int, user_id: int, user_name: str, won: bool):
                     user_name = EXCLUDED.user_name,
                     wins = peepee_scores.wins + %s,
                     losses = peepee_scores.losses + %s
-            ''', (
-                chat_id, user_id, user_name,
-                1 if won else 0, 0 if won else 1,
-                1 if won else 0, 0 if won else 1,
-            ))
+            ''', (chat_id, user_id, user_name,
+                  1 if won else 0, 0 if won else 1,
+                  1 if won else 0, 0 if won else 1))
         conn.commit()
     except Exception as e:
         print(f"Ошибка обновления счёта: {e}")
@@ -218,8 +211,7 @@ def get_peepee_scores(chat_id: int) -> list:
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                SELECT user_name, wins, losses
-                FROM peepee_scores
+                SELECT user_name, wins, losses FROM peepee_scores
                 WHERE chat_id = %s AND (wins + losses) > 0
                 ORDER BY wins DESC, losses ASC
             ''', (chat_id,))
@@ -235,14 +227,13 @@ def get_or_create_casino_balance(chat_id: int, user_id: int, user_name: str) -> 
             cursor.execute('''
                 INSERT INTO casino_balances (chat_id, user_id, user_name, balance)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (chat_id, user_id) DO UPDATE SET
-                    user_name = EXCLUDED.user_name
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET user_name = EXCLUDED.user_name
                 RETURNING balance
             ''', (chat_id, user_id, user_name, CASINO_START_BALANCE))
             conn.commit()
             return cursor.fetchone()[0]
     except Exception as e:
-        print(f"Ошибка get_or_create_casino_balance: {e}")
+        print(f"Ошибка casino balance: {e}")
         conn.rollback()
         return CASINO_START_BALANCE
     finally:
@@ -253,16 +244,14 @@ def update_casino_balance(chat_id: int, user_id: int, delta: int) -> int:
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                UPDATE casino_balances
-                SET balance = balance + %s
-                WHERE chat_id = %s AND user_id = %s
-                RETURNING balance
+                UPDATE casino_balances SET balance = balance + %s
+                WHERE chat_id = %s AND user_id = %s RETURNING balance
             ''', (delta, chat_id, user_id))
             conn.commit()
             row = cursor.fetchone()
             return row[0] if row else 0
     except Exception as e:
-        print(f"Ошибка update_casino_balance: {e}")
+        print(f"Ошибка update casino balance: {e}")
         conn.rollback()
         return 0
     finally:
@@ -273,32 +262,29 @@ def get_casino_leaderboard(chat_id: int) -> list:
     try:
         with conn.cursor() as cursor:
             cursor.execute('''
-                SELECT user_name, balance
-                FROM casino_balances
-                WHERE chat_id = %s
-                ORDER BY balance DESC
+                SELECT user_name, balance FROM casino_balances
+                WHERE chat_id = %s ORDER BY balance DESC
             ''', (chat_id,))
             return cursor.fetchall()
     finally:
         release_conn(conn)
 
-# 4. КАЗИНО — ЛОГИКА СЛОТОВ
+# 4. КАЗИНО — СЛОТЫ
 SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
 def spin_slots(bet: int) -> dict:
     """
     Режим "казино всегда побеждает":
       78%  — все разные (проигрыш, x0)
-      13%  — два одинаковых (x1.1) — едва отбиваешь
+      13%  — два одинаковых (x1.1)
        5%  — 🍒🍒🍒 (x2)
       2.5% — 🍋🍋🍋 (x3.5)
        1%  — 7️⃣7️⃣7️⃣ (x10)
       0.4% — 💎💎💎 (x7)
       0.1% — 🍆🍆🍆 (x20, джекпот)
-    Матожидание ~0.57$ на каждый вложенный доллар. Казино забирает 43%.
+    Матожидание ~0.57$. Казино забирает 43%.
     """
     r = random.random()
-
     if r < 0.78:
         symbols = random.sample(SLOT_SYMBOLS, 3)
         multiplier = 0
@@ -312,8 +298,7 @@ def spin_slots(bet: int) -> dict:
         symbols = [third, third, third]
         symbols[match_pos[0]] = sym
         symbols[match_pos[1]] = sym
-        remaining = [p for p in positions if p not in match_pos][0]
-        symbols[remaining] = third
+        symbols[[p for p in positions if p not in match_pos][0]] = third
         multiplier = 1.1
         result_type = "pair"
     elif r < 0.96:
@@ -339,13 +324,8 @@ def spin_slots(bet: int) -> dict:
 
     winnings = int(bet * multiplier)
     delta = winnings - bet
-    return {
-        "symbols": symbols,
-        "multiplier": multiplier,
-        "winnings": winnings,
-        "delta": delta,
-        "result_type": result_type
-    }
+    return {"symbols": symbols, "multiplier": multiplier, "winnings": winnings,
+            "delta": delta, "result_type": result_type}
 
 def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int) -> str:
     if result_type == "jackpot":
@@ -356,61 +336,57 @@ def get_casino_comment(name: str, result_type: str, delta: int, new_balance: int
         ])
     if result_type == "bigwin":
         return random.choice([
-            f"ЕБАТЬ ТЫ ФОРТОВЫЙ, {name}! Скорее депай ещё пока колесо фортуны не заметило свою ошибку. Такое везение случается раз в жизни — и ты уже потратил свой шанс.",
-            f"Ничего себе, {name}! Большой куш! Самое время остановиться... но ты же не остановишься, да? Мы знаем тебя.",
-            f"{name} поднял серьёзные бабки. Казино смотрит на тебя с уважением и ненавистью одновременно. Крути ещё — нам нужно вернуть своё.",
+            f"ЕБАТЬ ТЫ ФОРТОВЫЙ, {name}! Скорее депай ещё пока колесо фортуны не заметило свою ошибку.",
+            f"Ничего себе, {name}! Большой куш! Самое время остановиться... но ты же не остановишься, да?",
+            f"{name} поднял серьёзные бабки. Казино смотрит на тебя с уважением и ненавистью одновременно.",
         ])
     if result_type == "win":
         return random.choice([
             f"О, {name} выиграл! Скорее депай ещё пока везёт, идиот. Удача — она как кошка: погладил раз, укусит два.",
-            f"Смотри-ка, {name} в плюсе! Это называется 'начало конца'. Казино специально так делает — сначала даёт выиграть, потом забирает всё.",
+            f"Смотри-ка, {name} в плюсе! Это называется 'начало конца'.",
             f"{name}, поздравляю с маленькой победой в большой войне с казино. Спойлер: казино выиграет войну.",
-            f"Повезло {name}! Теперь ставь больше — раз пошла такая пьянка. Логика железная, да?",
         ])
     if result_type == "pair":
         return random.choice([
-            f"Пара у {name}. Х1.2, красавчик. Это не выигрыш, это подачка. Казино кормит тебя с ладони как голубя.",
-            f"{name}, пара — это казино говорит тебе 'иди сюда, хороший'. Не ведись. Хотя ты уже ведёшься.",
-            f"Маленький плюсик для {name}. Аппарат прогревается. Следующий спин будет либо джекпот либо дно — угадай что вероятнее.",
+            f"Пара у {name}. Х1.1, красавчик. Это не выигрыш, это подачка. Казино кормит тебя с ладони как голубя.",
+            f"{name}, пара — это казино говорит тебе 'иди сюда, хороший'. Не ведись.",
+            f"Маленький плюсик для {name}. Аппарат прогревается.",
         ])
     if new_balance >= 1000:
         return random.choice([
-            f"Мимо, {name}. Бывает. Ты ещё в плюсе — есть что терять. Это самое опасное состояние для лудомана.",
-            f"{name} слил ставку. Деньги ещё есть, значит казино своё ещё получит. Крути дальше.",
+            f"Мимо, {name}. Ты ещё в плюсе — есть что терять. Это самое опасное состояние для лудомана.",
+            f"{name} слил ставку. Деньги ещё есть, значит казино своё ещё получит.",
             f"Ай, {name}, не повезло. Зато ты богатый пока. Ключевое слово — пока.",
         ])
     elif new_balance >= 500:
         return random.choice([
-            f"Хм, {name}... Денежки тают. Чуешь этот запах? Это твои сбережения горят. Красиво горят, надо признать.",
-            f"{name}, осторожно — пахнет лудкой. Ты ещё не закрыл вкладку? Конечно нет. Понятно.",
-            f"Баланс падает, {name}. Это нормально, говоришь себе. Всего одна удачная ставка и отыграюсь. Классика жанра.",
+            f"Хм, {name}... Денежки тают. Чуешь этот запах? Это твои сбережения горят.",
+            f"{name}, осторожно — пахнет лудкой. Ты ещё не закрыл вкладку? Конечно нет.",
+            f"Баланс падает, {name}. Всего одна удачная ставка и отыграюсь. Классика жанра.",
         ])
     elif new_balance >= 0:
         return random.choice([
-            f"Почка ещё на месте, {name}? Проверь — скоро пригодится. Ты почти на нуле, дружище.",
-            f"{name}, ты в опасной близости от дна. Большинство людей на этом месте остановились бы. Но ты же не большинство.",
-            f"Осталось совсем чуть-чуть, {name}. Либо сейчас повезёт и отыграешься, либо... ну ты понимаешь. Крути.",
+            f"Почка ещё на месте, {name}? Проверь — скоро пригодится. Ты почти на нуле.",
+            f"{name}, ты в опасной близости от дна. Большинство людей здесь остановились бы.",
+            f"Осталось совсем чуть-чуть, {name}. Крути.",
         ])
     elif new_balance >= -1000:
         return random.choice([
-            f"ПОЗДРАВЛЯЮ, {name}! Ты официально в минусе! Почку уже оценил? На рынке сейчас неплохие цены.",
-            f"{name} ушёл в минус. Это не конец — это начало настоящей лудки. Добро пожаловать в клуб.",
-            f"Минус на балансе у {name}. Машину продавать ещё рано, но держи документы наготове.",
-            f"О, {name} в красной зоне! Звони другу, занимай бабки — казино ждёт. Долг — не проблема, проблема — не отыграться.",
+            f"ПОЗДРАВЛЯЮ, {name}! Ты официально в минусе! Почку уже оценил?",
+            f"{name} ушёл в минус. Это не конец — это начало настоящей лудки.",
+            f"О, {name} в красной зоне! Звони другу, занимай бабки — казино ждёт.",
         ])
     elif new_balance >= -5000:
         return random.choice([
-            f"{name}, ты уже серьёзно в яме. Хату заложил? Машину продал? Нет? Значит ещё есть что терять. Крути.",
-            f"Глубокий минус у {name}. На этом уровне нормальные люди звонят на горячую линию психологической помощи. Ты не нормальный — ты наш человек.",
-            f"СТОП, {name}. Нет, серьёзно, стоп. Подумай. Подумал? Хорошо. А теперь крути — думать вредно для азарта.",
-            f"{name} зарылся как крот. На этой глубине уже темно и страшно. Но джекпот где-то здесь, правда же? Правда?",
+            f"{name}, ты уже серьёзно в яме. Хату заложил? Машину продал? Нет? Значит ещё есть что терять.",
+            f"Глубокий минус у {name}. На этом уровне нормальные люди звонят на горячую линию.",
+            f"СТОП, {name}. Нет, серьёзно, стоп. Подумал? Хорошо. А теперь крути.",
         ])
     else:
         return random.choice([
-            f"ЛЕГЕНДА. {name} установил антирекорд казино. Это надо уметь. Напиши завещание и крути дальше — нам нужен новый рекорд.",
-            f"{name}, ты на такой глубине что уже видно магму. Казино тебя уважает. Казино тебя боготворит. Казино на тебе построило новое крыло.",
-            f"На этом уровне долга, {name}, уже не стыдно. Это искусство. Это дно такой красоты что хочется плакать и аплодировать одновременно.",
-            f"Друг, {name}... мы уже даже стебаться не можем. Это за гранью. Это легенда. Твоё имя впишут в историю этого казино золотыми буквами.",
+            f"ЛЕГЕНДА. {name} установил антирекорд казино. Напиши завещание и крути дальше.",
+            f"{name}, ты на такой глубине что уже видно магму. Казино на тебе построило новое крыло.",
+            f"На этом уровне долга, {name}, уже не стыдно. Это искусство.",
         ])
 
 # 5. УМНАЯ ОБРЕЗКА СООБЩЕНИЙ
@@ -461,15 +437,13 @@ def format_context(rows: list) -> str:
 async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str | None:
     size_mb = file_size / (1024 * 1024)
     if size_mb > MAX_VOICE_SIZE_MB:
-        return f"[файл слишком большой для распознавания: {size_mb:.1f} МБ]"
+        return f"[файл слишком большой: {size_mb:.1f} МБ]"
     try:
         buffer = io.BytesIO()
         await bot.download(file_id, destination=buffer)
         buffer.seek(0)
         buffer.name = filename
-        transcription = client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo", file=buffer,
-        )
+        transcription = client.audio.transcriptions.create(model="whisper-large-v3-turbo", file=buffer)
         return transcription.text
     except Exception as e:
         print(f"Ошибка транскрибации: {e}")
@@ -487,7 +461,6 @@ def get_dayana_block(questions: list) -> str:
 СТИЛЬ:
 - Сначала коротко перескажи вопрос своими словами, потом добавь стеб — одно-два предложения максимум.
 - Формат строго такой: "[Имя] спрашивал(а) [суть вопроса своими словами] — [стеб]"
-- Пример: "Коля спрашивал почему небо голубое — дружище, ты серьёзно? Гугл не завезли?"
 - Разговорный язык, можно немного мата.
 - Каждый вопрос — отдельная строка, начинается с "• ".
 
@@ -510,7 +483,7 @@ def get_dayana_block(questions: list) -> str:
 # 8. САММАРИ
 def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
     if message_count < 10:
-        volume_instruction = "Сообщений мало — будь краток, не раздувай из мухи слона."
+        volume_instruction = "Сообщений мало — будь краток."
     elif message_count < 50:
         volume_instruction = "Средняя активность — стандартный разбор."
     else:
@@ -518,7 +491,6 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
     prompt = f"""
 Ты — Батя этого чата. Не модератор, не ведущий, не журналист. Батя.
 Ты знаешь всех в лицо, помнишь кто что говорил месяц назад и не даёшь никому забыть об этом.
-Любишь всех, но спуску не даёшь никому. Ни новичкам, ни старожилам.
 
 ВВОДНЫЕ:
 - Период: {timeframe_text}
@@ -526,29 +498,22 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
 - {volume_instruction}
 
 КАК ГОВОРИШЬ:
-- Матом — естественно, как в разговоре с друзьями. Не для красоты, а потому что так говоришь.
-- Каждого называешь по имени и припоминаешь что он за человек.
-- Если кто-то нёс хуйню — говоришь прямо: нёс хуйню.
-- Если кто-то был красавчик — говоришь: красавчик, но тут же поддеваешь.
-- Короткие удары. Никакой воды. Никаких "следует отметить" и "таким образом".
-- Пишешь живо, резко, с характером. Как будто рассказываешь другу за пивом.
+- Матом — естественно, как в разговоре с друзьями.
+- Каждого называешь по имени.
+- Если кто-то нёс хуйню — говоришь прямо.
+- Короткие удары. Никакой воды.
+- Пишешь живо, резко, с характером.
 
-ЧТО ДОЛЖНО БЫТЬ В ТЕКСТЕ:
-- Какая атмосфера была в чате — весело, уныло, срач, философия?
-- Кто отличился и как именно — конкретно, с деталями
-- Что обсуждали и чем кончилось (или не кончилось)
-- Кто молчал весь день и вдруг вылез — отдельно отметить
-- Незакрытые вопросы и споры
-- Вердикт одной фразой — жёстко и точно
+ЧТО ДОЛЖНО БЫТЬ:
+- Атмосфера чата
+- Кто отличился и как
+- Что обсуждали и чем кончилось
+- Незакрытые споры
+- Вердикт одной фразой
 
-ЗАПРЕЩЕНО КАТЕГОРИЧЕСКИ:
-- Мягкие формулировки типа "участники обсудили" или "было высказано мнение"
-- Одинаковая структура каждый раз — удивляй
-- Шаблонные заголовки — придумывай свои каждый раз
-- Вата, политкорректность, осторожные формулировки
-- Хвалить без подъёба
+ЗАПРЕЩЕНО: мягкие формулировки, одинаковая структура, вата, хвалить без подъёба.
 
-Голосовые [🎤 Голосовое] и кружочки [📹 Кружочек] — полноценные сообщения, учитывай.
+Голосовые [🎤] и кружочки [📹] — полноценные сообщения.
 
 ВОТ ЧТО БЫЛО В ЧАТЕ:
 {messages_text}
@@ -566,26 +531,17 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
                 print(f"Модель {model} исчерпала лимит, переключаюсь...")
                 continue
             raise
-    raise Exception("Все модели исчерпали лимит. Попробуй позже.")
+    raise Exception("Все модели исчерпали лимит.")
 
-# 9. ДАЯНА — ОТВЕТ НА ВОПРОС
+# 9. ДАЯНА — ВОПРОС
 def ask_dayana(question: str) -> str:
     prompt = f"""
-Ты — Даяна. Не ассистент, не бот, не помощник. Даяна.
-Ты — секретарша со стальными нервами и острым языком.
-Умная, собранная, всё замечаешь. Говоришь только по делу — но если надо, можешь срезать одной фразой.
+Ты — Даяна. Секретарша со стальными нервами и острым языком.
+Чётко, по существу, без воды. Можешь срезать одной фразой.
+Никаких "конечно!", "отличный вопрос!". Говоришь как живой человек.
+Отвечаешь на русском языке.
 
-КАК ГОВОРИШЬ:
-- Чётко и по существу. Никакой воды.
-- Можешь быть саркастичной если вопрос того заслуживает.
-- Не грубишь без причины — но и нежничать не будешь.
-- Если вопрос тупой — скажешь об этом прямо, но всё равно ответишь.
-- Никаких "конечно!", "отличный вопрос!", "я рада помочь".
-- Говоришь как живой человек, не как справочник.
-- Отвечаешь на русском языке.
-
-ВОПРОС:
-{question}
+ВОПРОС: {question}
 """
     completion = client_dayana.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -594,32 +550,27 @@ def ask_dayana(question: str) -> str:
     )
     return completion.choices[0].message.content
 
-# 10. ДАЯНА — РАССУДИТЬ СПОР (умный промпт + qwen3)
+# 10. ДАЯНА — РАССУДИТЬ
 def dayana_judge(context: str, hint: str = None) -> str:
-    hint_block = f"\nЧТО ИМЕННО НУЖНО РАССУДИТЬ (подсказка от участника):\n{hint}\n" if hint else ""
+    hint_block = f"\nЧТО НУЖНО РАССУДИТЬ (подсказка):\n{hint}\n" if hint else ""
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами, острым языком и абсолютным чувством справедливости.
-Тебя попросили рассудить спор в чате.
 
-ШАГ 1 — РАЗБЕРИСЬ САМА (не пиши это вслух, просто подумай):
+ШАГ 1 — РАЗБЕРИСЬ (про себя, не пиши):
 - Кто участвует в споре? Назови имена.
-- В чём именно суть разногласия — одним предложением.
+- В чём суть разногласия — одним предложением.
 - Кто первым начал и кто эскалировал?
-- Есть ли в переписке посторонние сообщения не по теме спора? Игнорируй их.
-- У кого из сторон более весомые аргументы?
+- Игнорируй посторонние сообщения не по теме.
+- У кого более весомые аргументы?
 
 ШАГ 2 — ВЫНЕСИ ВЕРДИКТ (это и пиши):
-- Начни с короткого атмосферного действия в asterisk. Каждый раз разное.
-- Формат: *[действие]* — и дальше сразу текст.
-- Пример: *закуривает сигарету Kiss, смотрит в окно* — Так, разберёмся...
-- Назови стороны по имени — не "один участник" а конкретно кто.
-- Чёткий вердикт: кто прав, кто нет, почему. Никаких "с одной стороны".
-- Можешь поддеть того кто неправ — но справедливо.
-- Если все неправы — скажи прямо и объясни почему оба идиоты.
-- Максимум 5-6 предложений. Коротко и жёстко.
-- Отвечаешь на русском языке.
+- Начни с атмосферного действия: *[действие]* — текст.
+- Пример: *закуривает сигарету Kiss* — Так, разберёмся...
+- Называй стороны по именам. Чёткий вердикт. Никаких "с одной стороны".
+- Можешь поддеть неправого — справедливо.
+- Максимум 5-6 предложений. Отвечаешь на русском.
 {hint_block}
-ПЕРЕПИСКА ИЗ ЧАТА:
+ПЕРЕПИСКА:
 {context}
 
 Вынеси вердикт.
@@ -629,39 +580,35 @@ def dayana_judge(context: str, hint: str = None) -> str:
             completion = client_dayana.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=600,
+                temperature=0.7, max_tokens=600,
             )
             return completion.choices[0].message.content
         except Exception as e:
             if "rate_limit" in str(e).lower() or "model" in str(e).lower():
-                print(f"Даяна рассуди: модель {model} недоступна, переключаюсь...")
+                print(f"Даяна рассуди: {model} недоступна, переключаюсь...")
                 continue
             raise
     raise Exception("Все модели недоступны")
 
-# 11. ДАЯНА — КТО ВИНОВАТ (умный промпт + qwen3)
+# 11. ДАЯНА — ВИНОВАТ
 def dayana_guilty(context: str, hint: str = None) -> str:
-    hint_block = f"\nПОДСКАЗКА О СИТУАЦИИ:\n{hint}\n" if hint else ""
+    hint_block = f"\nПОДСКАЗКА:\n{hint}\n" if hint else ""
     prompt = f"""
-Ты — Даяна. Секретарша с холодной головой, острым взглядом и нулевой терпимостью к отмазкам.
-Тебя попросили найти виноватого.
+Ты — Даяна. Секретарша с холодной головой и нулевой терпимостью к отмазкам.
 
-ШАГ 1 — ПРОАНАЛИЗИРУЙ (не пиши, просто подумай):
-- Что произошло? Восстанови хронологию.
-- Кто что сделал или сказал — конкретно.
-- Игнорируй сообщения не по теме — в чате всегда есть посторонний шум.
-- Кто объективно облажался или спровоцировал?
+ШАГ 1 — ПРОАНАЛИЗИРУЙ (про себя):
+- Что произошло? Хронология.
+- Кто что сделал — конкретно.
+- Игнорируй посторонний шум.
+- Кто объективно облажался?
 
 ШАГ 2 — НАЗНАЧЬ ВИНОВАТОГО (это и пиши):
-- Конкретное имя. Не "некоторые участники" — а кто именно.
-- Чёткая причина: что именно он сделал не так.
-- Можешь быть саркастичной — но справедливой, не злобной.
-- Если вина распределена — назови главного виноватого и объясни градацию.
-- Коротко: 3-4 предложения максимум.
-- Отвечаешь на русском языке.
+- Конкретное имя. Конкретная причина.
+- Саркастично — но справедливо.
+- Если вина распределена — назови главного.
+- 3-4 предложения. Отвечаешь на русском.
 {hint_block}
-ПЕРЕПИСКА ИЗ ЧАТА:
+ПЕРЕПИСКА:
 {context}
 
 Назначь виноватого.
@@ -671,13 +618,12 @@ def dayana_guilty(context: str, hint: str = None) -> str:
             completion = client_dayana.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=500,
+                temperature=0.7, max_tokens=500,
             )
             return completion.choices[0].message.content
         except Exception as e:
             if "rate_limit" in str(e).lower() or "model" in str(e).lower():
-                print(f"Даяна виноват: модель {model} недоступна, переключаюсь...")
+                print(f"Даяна виноват: {model} недоступна, переключаюсь...")
                 continue
             raise
     raise Exception("Все модели недоступны")
@@ -722,7 +668,410 @@ def verify_game_token(token: str) -> dict | None:
     except Exception:
         return None
 
-# 14. ВЕБ — CORS
+# ═══════════════════════════════════════════════
+# 14. ИГРА "Я НИКОГДА НЕ"
+# ═══════════════════════════════════════════════
+
+def generate_never_phrase(players: list, chat_context: str = "") -> str:
+    """AI генерирует фразу 'Я никогда не...' с учётом игроков и истории чата"""
+    players_str = ", ".join(players)
+    context_block = f"\nПОСЛЕДНИЕ СООБЩЕНИЯ ЧАТА ДЛЯ ВДОХНОВЕНИЯ:\n{chat_context}\n" if chat_context else ""
+    prompt = f"""
+Ты придумываешь фразы для игры "Я никогда не" для компании друзей в Telegram-чате.
+
+ИГРОКИ: {players_str}
+
+ПРАВИЛА ГЕНЕРАЦИИ:
+- Фраза начинается со слов "Я никогда не"
+- Должна быть провокационной, смешной и личной — чтобы хотелось признаться
+- Касается реальных жизненных ситуаций: отношения, деньги, работа, алкоголь, секреты, неловкие моменты
+- Можно упоминать имена игроков — это делает игру живее
+- Не должна быть оскорбительной или слишком жёсткой
+- Разговорный язык, можно лёгкий стёб
+- Каждый раз новая — не повторяй банальные примеры
+{context_block}
+Выдай ТОЛЬКО одну фразу, начиная со слов "Я никогда не". Без кавычек, без пояснений.
+"""
+    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
+        try:
+            completion = client_dayana.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.95,
+                max_tokens=100,
+            )
+            phrase = completion.choices[0].message.content.strip()
+            # Убираем кавычки если модель добавила
+            phrase = phrase.strip('"\'«»')
+            if not phrase.lower().startswith("я никогда не"):
+                phrase = "Я никогда не " + phrase
+            return phrase
+        except Exception as e:
+            if "rate_limit" in str(e).lower():
+                continue
+            raise
+    return "Я никогда не делал что-то о чём потом не жалел"
+
+
+def build_never_join_text(game: dict) -> str:
+    """Текст сообщения в фазе сбора игроков"""
+    players = list(game["players"].values())
+    count = len(players)
+    if count == 0:
+        players_str = "<i>пока никого нет...</i>"
+    else:
+        players_str = ", ".join(f"<b>{p}</b>" for p in players)
+
+    return (
+        f"🎮 <b>Игра «Я никогда не»</b>\n\n"
+        f"Нажми кнопку чтобы войти в игру!\n"
+        f"Игра стартует через {NEVER_JOIN_TIMEOUT} сек после первого игрока.\n\n"
+        f"👥 Игроки ({count}): {players_str}"
+    )
+
+
+def build_never_vote_text(game: dict) -> str:
+    """Текст сообщения во время голосования"""
+    phrase = game["current_phrase"]
+    round_n = game["round"]
+    total = game["max_rounds"]
+
+    did_names = [game["players"][uid] for uid in game["votes"] if game["votes"][uid] == "did" and uid in game["players"]]
+    never_names = [game["players"][uid] for uid in game["votes"] if game["votes"][uid] == "never" and uid in game["players"]]
+
+    did_str = ", ".join(f"<b>{n}</b>" for n in did_names) if did_names else "—"
+    never_str = ", ".join(f"<b>{n}</b>" for n in never_names) if never_names else "—"
+
+    # Новые игроки которые ещё не проголосовали
+    voted = set(game["votes"].keys())
+    all_players = set(game["players"].keys())
+    pending = [game["players"][uid] for uid in (all_players - voted)]
+    pending_str = f"\n⏳ Ещё не ответили: {', '.join(pending)}" if pending else ""
+
+    return (
+        f"🔥 <b>Раунд {round_n}/{total}</b>\n\n"
+        f"<b>{phrase}</b>\n\n"
+        f"🙋 Делал ({len(did_names)}): {did_str}\n"
+        f"🙅 Не делал ({len(never_names)}): {never_str}"
+        f"{pending_str}"
+    )
+
+
+def build_never_results_text(game: dict) -> str:
+    """Итоги всей игры"""
+    scores = game["scores"]  # user_id -> кол-во "делал"
+    players = game["players"]
+
+    if not players:
+        return "Никто не играл 🤷"
+
+    # Сортируем по количеству "делал" (больше = опытнее жизни)
+    sorted_players = sorted(players.items(), key=lambda x: scores.get(x[0], 0), reverse=True)
+    total_rounds = game["max_rounds"]
+
+    text = f"🏁 <b>Игра «Я никогда не» завершена!</b>\n\n"
+    text += f"<b>Итоги за {total_rounds} раундов:</b>\n\n"
+
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (uid, name) in enumerate(sorted_players):
+        did_count = scores.get(uid, 0)
+        pct = int((did_count / total_rounds) * 100)
+        medal = medals[i] if i < 3 else "▪️"
+        verdict = "прожжённый" if pct >= 70 else ("бывалый" if pct >= 40 else "скромняга")
+        text += f"{medal} <b>{name}</b> — делал {did_count}/{total_rounds} раз ({pct}%) — {verdict}\n"
+
+    # Самый честный (больше всех "делал")
+    if sorted_players:
+        winner_uid, winner_name = sorted_players[0]
+        loser_uid, loser_name = sorted_players[-1]
+        winner_count = scores.get(winner_uid, 0)
+        loser_count = scores.get(loser_uid, 0)
+
+        if winner_count > 0:
+            text += f"\n🏆 <b>{winner_name}</b> — самый опытный. Жил на полную."
+        if loser_count == 0:
+            text += f"\n😇 <b>{loser_name}</b> — либо святой, либо врёт."
+        elif len(sorted_players) > 1 and loser_count < winner_count:
+            text += f"\n😂 <b>{loser_name}</b> — скромняга чата. Или просто стеснялся признаваться."
+
+    return text
+
+
+def build_never_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
+    """Клавиатура в фазе сбора"""
+    count = len(game["players"])
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text=f"🙋 Я играю! ({count})", callback_data="never_join")],
+        [types.InlineKeyboardButton(text="▶️ Начать сейчас", callback_data="never_start")],
+    ])
+
+
+def build_never_keyboard_vote(game: dict) -> types.InlineKeyboardMarkup:
+    """Клавиатура для голосования + кнопка присоединиться"""
+    did_count = sum(1 for v in game["votes"].values() if v == "did")
+    never_count = sum(1 for v in game["votes"].values() if v == "never")
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text=f"🙋 Делал ({did_count})", callback_data="never_did"),
+            types.InlineKeyboardButton(text=f"🙅 Не делал ({never_count})", callback_data="never_never"),
+        ],
+        [types.InlineKeyboardButton(text="➕ Я тоже играю!", callback_data="never_join")],
+    ])
+
+
+async def never_auto_start(chat_id: int, message_id: int):
+    """Таймер автостарта после сбора игроков"""
+    await asyncio.sleep(NEVER_JOIN_TIMEOUT)
+    game = never_games.get(chat_id)
+    if not game or game.get("phase") != "joining":
+        return
+    if len(game["players"]) < 2:
+        try:
+            await bot.edit_message_text(
+                "😕 Недостаточно игроков. Нужно хотя бы 2 человека.\nНапиши /never чтобы начать заново.",
+                chat_id=chat_id, message_id=message_id,
+                reply_markup=None
+            )
+        except Exception:
+            pass
+        never_games.pop(chat_id, None)
+        return
+    await never_start_game(chat_id, message_id)
+
+
+async def never_start_game(chat_id: int, message_id: int):
+    """Запускает игру — переходим к первому раунду"""
+    game = never_games.get(chat_id)
+    if not game:
+        return
+
+    # Отменяем таймер сбора если он ещё тикает
+    if game.get("join_task") and not game["join_task"].done():
+        game["join_task"].cancel()
+
+    game["phase"] = "playing"
+    game["round"] = 0
+    game["scores"] = {uid: 0 for uid in game["players"]}
+    game["join_message_id"] = message_id
+
+    await never_next_round(chat_id)
+
+
+async def never_next_round(chat_id: int):
+    """Запускает следующий раунд"""
+    game = never_games.get(chat_id)
+    if not game:
+        return
+
+    game["round"] += 1
+    if game["round"] > game["max_rounds"]:
+        await never_finish(chat_id)
+        return
+
+    game["phase"] = "voting"
+    game["votes"] = {}
+
+    # Берём немного истории чата для вдохновения AI
+    try:
+        rows = get_last_messages(chat_id, limit=15)
+        chat_context = format_context(rows)
+    except Exception:
+        chat_context = ""
+
+    players_list = list(game["players"].values())
+
+    # Генерируем фразу через AI
+    try:
+        phrase = generate_never_phrase(players_list, chat_context)
+    except Exception as e:
+        print(f"Ошибка генерации фразы: {e}")
+        phrase = "Я никогда не делал что-то о чём потом жалел"
+
+    game["current_phrase"] = phrase
+
+    text = build_never_vote_text(game)
+    keyboard = build_never_keyboard_vote(game)
+
+    try:
+        # Редактируем существующее сообщение или шлём новое
+        if game.get("current_message_id"):
+            await bot.edit_message_text(
+                text, chat_id=chat_id,
+                message_id=game["current_message_id"],
+                reply_markup=keyboard, parse_mode="HTML"
+            )
+        else:
+            msg = await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+            game["current_message_id"] = msg.message_id
+    except Exception as e:
+        print(f"Ошибка отправки раунда: {e}")
+        try:
+            msg = await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+            game["current_message_id"] = msg.message_id
+        except Exception:
+            pass
+
+    # Запускаем таймер голосования
+    task = asyncio.create_task(never_vote_timer(chat_id, game["round"]))
+    game["vote_task"] = task
+
+
+async def never_vote_timer(chat_id: int, round_n: int):
+    """Таймер окончания голосования"""
+    await asyncio.sleep(NEVER_VOTE_TIMEOUT)
+    game = never_games.get(chat_id)
+    if not game or game.get("phase") != "voting" or game.get("round") != round_n:
+        return
+    await never_next_round(chat_id)
+
+
+async def never_finish(chat_id: int):
+    """Завершает игру и показывает итоги"""
+    game = never_games.get(chat_id)
+    if not game:
+        return
+
+    text = build_never_results_text(game)
+    msg_id = game.get("current_message_id")
+
+    try:
+        if msg_id:
+            await bot.edit_message_text(
+                text, chat_id=chat_id, message_id=msg_id,
+                reply_markup=None, parse_mode="HTML"
+            )
+        else:
+            await bot.send_message(chat_id, text, parse_mode="HTML")
+    except Exception as e:
+        print(f"Ошибка финала игры: {e}")
+        try:
+            await bot.send_message(chat_id, text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    never_games.pop(chat_id, None)
+
+
+# ── CALLBACK: КНОПКИ ИГРЫ ──
+@dp.callback_query(lambda c: c.data in ("never_join", "never_start", "never_did", "never_never"))
+async def never_callback(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    user_id = callback.from_user.id
+    user_name = callback.from_user.full_name or callback.from_user.username or "Анон"
+    action = callback.data
+    game = never_games.get(chat_id)
+
+    if not game:
+        await callback.answer("Игра уже закончилась. Начни новую: /never", show_alert=False)
+        return
+
+    # ── Присоединиться ──
+    if action == "never_join":
+        game["players"][user_id] = user_name
+
+        # Инициализируем счёт для нового игрока если игра уже идёт
+        if "scores" in game and user_id not in game["scores"]:
+            game["scores"][user_id] = 0
+
+        if game["phase"] == "joining":
+            # Запускаем таймер при первом игроке
+            if len(game["players"]) == 1 and not game.get("join_task"):
+                task = asyncio.create_task(
+                    never_auto_start(chat_id, callback.message.message_id)
+                )
+                game["join_task"] = task
+
+            try:
+                await callback.message.edit_text(
+                    build_never_join_text(game),
+                    reply_markup=build_never_keyboard_join(game),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            await callback.answer(f"Ты в игре, {user_name}! 🙋", show_alert=False)
+
+        elif game["phase"] == "voting":
+            # Можно присоединиться во время игры
+            try:
+                await callback.message.edit_text(
+                    build_never_vote_text(game),
+                    reply_markup=build_never_keyboard_vote(game),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            await callback.answer(f"Добро пожаловать, {user_name}! Голосуй! 🎮", show_alert=False)
+        return
+
+    # ── Начать сейчас ──
+    if action == "never_start":
+        if game["phase"] != "joining":
+            await callback.answer("Игра уже идёт!", show_alert=False)
+            return
+        if len(game["players"]) < 2:
+            await callback.answer("Нужно хотя бы 2 игрока!", show_alert=True)
+            return
+        await callback.answer("Поехали! 🚀", show_alert=False)
+        await never_start_game(chat_id, callback.message.message_id)
+        return
+
+    # ── Голосование ──
+    if action in ("never_did", "never_never"):
+        if game["phase"] != "voting":
+            await callback.answer("Голосование закончилось!", show_alert=False)
+            return
+
+        # Если человек ещё не в игре — добавляем
+        if user_id not in game["players"]:
+            game["players"][user_id] = user_name
+            if "scores" in game:
+                game["scores"][user_id] = 0
+
+        vote = "did" if action == "never_did" else "never"
+        prev_vote = game["votes"].get(user_id)
+
+        if prev_vote == vote:
+            await callback.answer("Ты уже так проголосовал!", show_alert=False)
+            return
+
+        game["votes"][user_id] = vote
+
+        # Обновляем счёт
+        if vote == "did":
+            game["scores"][user_id] = game["scores"].get(user_id, 0) + 1
+            # Если переголосовал с "never" — убираем предыдущий счёт
+            if prev_vote == "never":
+                pass  # счёт уже не менялся за "never"
+        elif vote == "never" and prev_vote == "did":
+            # Переголосовал с "did" на "never" — убираем очко
+            game["scores"][user_id] = max(0, game["scores"].get(user_id, 0) - 1)
+
+        try:
+            await callback.message.edit_text(
+                build_never_vote_text(game),
+                reply_markup=build_never_keyboard_vote(game),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+        phrase = "Делал 🙋" if vote == "did" else "Не делал 🙅"
+        await callback.answer(phrase, show_alert=False)
+
+        # Если все проголосовали — переходим к следующему раунду досрочно
+        all_voted = all(uid in game["votes"] for uid in game["players"])
+        if all_voted and len(game["players"]) >= 2:
+            if game.get("vote_task") and not game["vote_task"].done():
+                game["vote_task"].cancel()
+            await asyncio.sleep(2)  # небольшая пауза чтобы все увидели результат
+            await never_next_round(chat_id)
+        return
+
+    await callback.answer()
+
+
+# 15. ВЕБ — CORS
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
@@ -734,7 +1083,7 @@ async def cors_middleware(request, handler):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
-# 15. ВЕБ — ЭНДПОИНТЫ
+# 16. ВЕБ — ЭНДПОИНТЫ
 async def handle_result(request):
     try:
         data = await request.json()
@@ -773,14 +1122,9 @@ async def handle_casino_spin(request):
         new_balance = update_casino_balance(ALLOWED_CHAT_ID, user_id, result["delta"])
         comment = get_casino_comment(user_name, result["result_type"], result["delta"], new_balance)
         return web.json_response({
-            "ok": True,
-            "symbols": result["symbols"],
-            "multiplier": result["multiplier"],
-            "winnings": result["winnings"],
-            "delta": result["delta"],
-            "result_type": result["result_type"],
-            "new_balance": new_balance,
-            "comment": comment,
+            "ok": True, "symbols": result["symbols"], "multiplier": result["multiplier"],
+            "winnings": result["winnings"], "delta": result["delta"],
+            "result_type": result["result_type"], "new_balance": new_balance, "comment": comment,
         })
     except Exception as e:
         print(f"Ошибка casino_spin: {e}")
@@ -800,14 +1144,12 @@ async def handle_casino_balance(request):
         payload = verify_game_token(token)
         if not payload:
             return web.json_response({"error": "Unauthorized"}, status=401)
-        user_id = int(payload["user_id"])
-        user_name = payload["user_name"]
-        balance = get_or_create_casino_balance(ALLOWED_CHAT_ID, user_id, user_name)
-        return web.json_response({"balance": balance, "user_name": user_name})
+        balance = get_or_create_casino_balance(ALLOWED_CHAT_ID, int(payload["user_id"]), payload["user_name"])
+        return web.json_response({"balance": balance, "user_name": payload["user_name"]})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-# 16. КОМАНДЫ БОТА
+# 17. КОМАНДЫ БОТА
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -821,20 +1163,54 @@ async def cmd_help(message: types.Message):
         "/summary 24 — выжимка за сутки\n\n"
         "/id — узнать ID этого чата\n"
         "/help — это сообщение\n\n"
-        "⚠️ Максимум: 48 часов за один запрос\n"
-        "🎤 Голосовые и кружочки тоже учитываются\n\n"
         "🎮 /game — найди писюн\n"
         "🍆 /peepee — рейтинг охотников\n"
         "📊 /mypeepee — твоя статистика\n\n"
         "🎰 /casino — слоты (стартовые $1000)\n\n"
+        "🎲 /never — игра «Я никогда не» (6 раундов, AI-фразы)\n\n"
         "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
         "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
-        "   └ ответь на сообщение из спора для точного контекста\n"
-        "   └ или: Даяна рассуди [суть спора]\n"
-        "👉 <b>Даяна кто виноват</b> — назначить виноватого\n"
-        "   └ ответь на сообщение или добавь подсказку"
+        "👉 <b>Даяна кто виноват</b> — назначить виноватого"
     )
     await message.answer(help_text, parse_mode="HTML")
+
+@dp.message(Command("never"))
+async def cmd_never(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+        return
+    chat_id = message.chat.id
+
+    # Если игра уже идёт — сообщаем
+    if chat_id in never_games:
+        game = never_games[chat_id]
+        if game["phase"] == "joining":
+            await message.answer("Уже идёт сбор игроков! Нажми кнопку ниже чтобы войти.")
+        else:
+            await message.answer(
+                f"Игра уже идёт — раунд {game['round']}/{game['max_rounds']}.\n"
+                f"Нажми «Я тоже играю!» на текущем сообщении чтобы присоединиться."
+            )
+        return
+
+    # Создаём новую игру
+    never_games[chat_id] = {
+        "phase": "joining",
+        "players": {},          # user_id -> name
+        "votes": {},            # user_id -> "did" | "never"
+        "scores": {},           # user_id -> int
+        "current_phrase": "",
+        "round": 0,
+        "max_rounds": NEVER_ROUNDS,
+        "current_message_id": None,
+        "join_task": None,
+        "vote_task": None,
+    }
+
+    game = never_games[chat_id]
+    text = build_never_join_text(game)
+    keyboard = build_never_keyboard_join(game)
+    msg = await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    game["current_message_id"] = msg.message_id
 
 @dp.message(Command("game"))
 async def cmd_game(message: types.Message):
@@ -852,8 +1228,7 @@ async def cmd_game(message: types.Message):
         )
     ]])
     await message.answer(
-        f"🍆 <b>{user_name}</b>, найди писюн!\n"
-        f"<i>Ссылка действует 5 минут — только для тебя</i>",
+        f"🍆 <b>{user_name}</b>, найди писюн!\n<i>Ссылка действует 5 минут — только для тебя</i>",
         reply_markup=keyboard, parse_mode="HTML"
     )
 
@@ -956,7 +1331,7 @@ async def cmd_summary(message: types.Message):
             ''', (message.chat.id, hours))
             all_rows = cursor.fetchall()
     except Exception as e:
-        await status_msg.edit_text("Ошибка при чтении базы данных. Попробуй ещё раз.")
+        await status_msg.edit_text("Ошибка при чтении базы данных.")
         return
     finally:
         release_conn(conn)
@@ -977,7 +1352,7 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 17. СБОР СООБЩЕНИЙ
+# 18. СБОР СООБЩЕНИЙ
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
@@ -994,7 +1369,6 @@ async def collect_messages(message: types.Message):
     if message.text:
         text_lower = message.text.lower()
 
-        # ── Даяна ответь ──
         if "даяна" in text_lower and "ответь" in text_lower:
             try:
                 idx = text_lower.index("ответь") + len("ответь")
@@ -1011,26 +1385,17 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу ответить прямо сейчас.")
             return
 
-        # ── Даяна рассуди ──
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
-                # Подсказка — текст после "рассуди"
                 idx = text_lower.index("рассуди") + len("рассуди")
                 hint = message.text[idx:].strip() or None
-
-                # Если ответили на конкретное сообщение — берём контекст вокруг него
                 if message.reply_to_message and message.reply_to_message.date:
-                    anchor_ts = message.reply_to_message.date
-                    rows = get_messages_around_timestamp(message.chat.id, anchor_ts, before=15, after=8)
-                    context_note = "📌 Контекст вокруг указанного сообщения"
+                    rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 15, 8)
                 else:
                     rows = get_last_messages(message.chat.id, limit=25)
-                    context_note = "📋 Последние сообщения чата"
-
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
-
                 verdict = dayana_judge(format_context(rows), hint)
                 safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>⚖️ Даяна:</b>\n\n{safe_verdict}", parse_mode="HTML")
@@ -1039,24 +1404,17 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу рассудить прямо сейчас.")
             return
 
-        # ── Даяна кто виноват ──
         if "даяна" in text_lower and "виноват" in text_lower:
             try:
-                # Подсказка — текст после "виноват"
                 idx = text_lower.index("виноват") + len("виноват")
                 hint = message.text[idx:].strip() or None
-
-                # Если ответили на конкретное сообщение — берём контекст вокруг него
                 if message.reply_to_message and message.reply_to_message.date:
-                    anchor_ts = message.reply_to_message.date
-                    rows = get_messages_around_timestamp(message.chat.id, anchor_ts, before=12, after=6)
+                    rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 12, 6)
                 else:
                     rows = get_last_messages(message.chat.id, limit=20)
-
                 if not rows:
                     await message.reply("Не в чем разбираться — чат пустой.")
                     return
-
                 guilty = dayana_guilty(format_context(rows), hint)
                 safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>👉 Даяна:</b>\n\n{safe_guilty}", parse_mode="HTML")
@@ -1065,7 +1423,6 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
 
-    # Сохраняем сообщения
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
