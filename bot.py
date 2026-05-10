@@ -671,8 +671,6 @@ def verify_game_token(token: str) -> dict | None:
 # ═══════════════════════════════════════════════
 # 14. ИГРА "Я НИКОГДА НЕ"
 # ═══════════════════════════════════════════════
-phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"])
-game["used_phrases"].append(phrase)
 
 def generate_never_phrase(players: list, chat_context: str = "", used_phrases: list = []) -> str:
     players_str = ", ".join(players)
@@ -895,7 +893,8 @@ async def never_next_round(chat_id: int):
 
     # Генерируем фразу через AI
     try:
-        phrase = generate_never_phrase(players_list, chat_context)
+        phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"])
+        game["used_phrases"].append(phrase)
     except Exception as e:
         print(f"Ошибка генерации фразы: {e}")
         phrase = "Я никогда не делал что-то о чём потом жалел"
