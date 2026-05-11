@@ -672,34 +672,42 @@ def verify_game_token(token: str) -> dict | None:
 # 14. ИГРА "Я НИКОГДА НЕ"
 # ═══════════════════════════════════════════════
 
-def generate_never_phrase(players: list, chat_context: str = "", used_phrases: list = []) -> str:
+NEVER_CATEGORIES = [
+    ("🔞 Интимное", "секс, отношения, измены, пикантные ситуации между людьми"),
+    ("✈️ Путешествия", "страны, приключения в поездках, экзотика, странные ситуации за границей"),
+    ("🍕 Еда и вкусы", "странная еда, гастрономические подвиги, отвращение, экзотические блюда"),
+    ("🤝 С друзьями", "совместные безумства, предательство друга, дружеские споры и пари"),
+    ("🪂 Экстрим", "прыжки, скорость, риск, адреналин, опасные ситуации"),
+    ("💼 Работа и деньги", "увольнения, долги, крупные траты, халтура, странные подработки"),
+    ("🍺 Вечеринки и алкоголь", "пьяные истории, стыдные моменты на вечеринках, утро после"),
+    ("😈 Мелкие грехи", "мелкое воровство, ложь, нарушение правил, мелкое мошенничество"),
+    ("😱 Страхи и фобии", "то от чего реально страшно, панические ситуации, столкновение со страхом"),
+    ("💔 Отношения и бывшие", "расставания, ревность, странные свидания, бывшие партнёры"),
+    ("👮 На грани закона", "реальные приводы в полицию, разговоры с копами, ушёл от наказания"),
+    ("🤡 Публичный позор", "упал на людях, сказал что-то не то не тому, опозорился на важном событии"),
+]
+
+def generate_never_phrase(players: list, chat_context: str = "", used_phrases: list = [], category: tuple = None) -> str:
     players_str = ", ".join(players)
     context_block = f"\nИСТОРИЯ ЧАТА ДЛЯ ВДОХНОВЕНИЯ:\n{chat_context}\n" if chat_context else ""
     used_block = f"\nЭТИ ФРАЗЫ УЖЕ БЫЛИ — НЕ ПОВТОРЯЙ:\n" + "\n".join(f"- {p}" for p in used_phrases) + "\n" if used_phrases else ""
+    cat_name, cat_desc = category if category else ("Разное", "любая тема")
 
     prompt = f"""
 Ты придумываешь фразы для игры "Я никогда не" для взрослой компании друзей 18+.
 
 ИГРОКИ (знай их имена, но НЕ вставляй в фразу): {players_str}
 
+КАТЕГОРИЯ ЭТОГО РАУНДА: {cat_name}
+ТЕМА: {cat_desc}
+
 ПРАВИЛА:
 - Фраза начинается со слов "Я никогда не"
+- Строго по теме категории — не отклоняйся
 - Универсальная — про опыт или действие, НЕ про конкретного человека из чата
-- Провокационно, смешно, немного стыдно признаваться — чтобы половина подняла руку
-- Чередуй темы: секс и отношения, алкоголь и вечеринки, работа и деньги, экстрим и приключения, еда, страхи, неловкие ситуации, мелкие преступления
-- Примерно треть вопросов должна быть откровенной на тему секса и отношений — это взрослая компания
-- Разные уровни откровенности: от лёгкого стёба до реально пикантного
+- Провокационно и смешно — чтобы половина хотела признаться
 - Никаких имён игроков в самой фразе
-
-ПРИМЕРЫ:
-- Я никогда не занимался сексом в общественном месте
-- Я никогда не просыпался рядом с кем-то и не помнил их имени
-- Я никогда не симулировал оргазм
-- Я никогда не прыгал с парашютом
-- Я никогда не воровал что-то в магазине
-- Я никогда не увольнялся в скандале
-- Я никогда не писал пьяным бывшему
-- Я никогда не делал что-то на спор и потом жалел
+- Одна конкретная ситуация, не абстрактная
 {used_block}{context_block}
 Выдай ТОЛЬКО одну фразу начиная со слов "Я никогда не". Без кавычек, без пояснений.
 """
@@ -711,9 +719,7 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
                 temperature=0.95,
                 max_tokens=100,
             )
-            phrase = completion.choices[0].message.content.strip()
-            # Убираем кавычки если модель добавила
-            phrase = phrase.strip('"\'«»')
+            phrase = completion.choices[0].message.content.strip().strip('"\'«»')
             if not phrase.lower().startswith("я никогда не"):
                 phrase = "Я никогда не " + phrase
             return phrase
@@ -721,7 +727,7 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
             if "rate_limit" in str(e).lower():
                 continue
             raise
-    return "Я никогда не делал что-то о чём потом не жалел"
+    return "Я никогда не делал что-то о чём потом жалел"
 
 
 def build_never_join_text(game: dict) -> str:
@@ -759,8 +765,11 @@ def build_never_vote_text(game: dict) -> str:
     pending = [game["players"][uid] for uid in (all_players - voted)]
     pending_str = f"\n⏳ Ещё не ответили: {', '.join(pending)}" if pending else ""
 
+    categories = game.get("categories", [])
+    cat_label = categories[round_n - 1][0] if categories and round_n <= len(categories) else ""
+
     return (
-        f"🔥 <b>Раунд {round_n}/{total}</b>\n\n"
+        f"🔥 <b>Раунд {round_n}/{total}</b> {cat_label}\n\n"
         f"<b>{phrase}</b>\n\n"
         f"🙋 Делал ({len(did_names)}): {did_str}\n"
         f"🙅 Не делал ({len(never_names)}): {never_str}"
@@ -893,7 +902,8 @@ async def never_next_round(chat_id: int):
 
     # Генерируем фразу через AI
     try:
-        phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"])
+        category = game["categories"][game["round"] - 1] if game.get("categories") else None
+        phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"], category)
         game["used_phrases"].append(phrase)
     except Exception as e:
         print(f"Ошибка генерации фразы: {e}")
@@ -1218,6 +1228,7 @@ async def cmd_never(message: types.Message):
         "join_task": None,
         "vote_task": None,
         "used_phrases": [],
+        "categories": random.sample(NEVER_CATEGORIES, NEVER_ROUNDS),
     }
 
     game = never_games[chat_id]
