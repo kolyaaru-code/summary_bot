@@ -1090,136 +1090,128 @@ async def never_callback(callback: types.CallbackQuery):
 
 
 # ═══════════════════════════════════════════════
-# 15. ИГРА "КТО СКОРЕЕ ВСЕГО"
+# 15. ИГРА "УГАДАЙ АВТОРА"
 # ═══════════════════════════════════════════════
 
-WHO_JOIN_TIMEOUT = 45
-WHO_VOTE_TIMEOUT = 30
-WHO_ROUNDS = 6
+QUOTE_JOIN_TIMEOUT = 45
+QUOTE_VOTE_TIMEOUT = 30
+QUOTE_ROUNDS = 6
+QUOTE_MIN_MSG_LENGTH = 15   # минимальная длина цитаты
+QUOTE_MAX_MSG_LENGTH = 200  # максимальная длина цитаты
 
-who_games: dict = {}
+quote_games: dict = {}
 
-WHO_CATEGORIES = [
-    ("😈 Тёмная сторона", "предательство, жадность, эгоизм, мелкие грехи"),
-    ("🍺 Вечеринки", "алкоголь, безумные поступки, утро после, стыдные истории"),
-    ("💔 Отношения", "измены, ревность, странное поведение с партнёром, бывшие"),
-    ("💼 Работа и деньги", "халтура, долги, странные решения, уволиться в скандале"),
-    ("🤝 Дружба", "предать друга, занять и не отдать, сдать с потрохами"),
-    ("😱 Трусость и страхи", "сбежать от проблем, избегать ответственности, струсить"),
-    ("🔞 Интимное", "пикантные ситуации, странные предпочтения, неловкие моменты"),
-    ("🤡 Позор", "опозориться публично, сморозить глупость, стать мемом"),
-    ("🪂 Безумство", "прыгнуть с парашютом, уехать спонтанно, сделать татуировку"),
-    ("👮 На грани", "нарушить закон, уйти от наказания, договориться с копами"),
-    ("🧠 Странности", "верить в мистику, иметь странные привычки, быть непредсказуемым"),
-    ("💰 Халява", "схитрить ради выгоды, найти лазейку, получить что-то нечестно"),
-]
-
-def generate_who_question(players: list, category: tuple, used_questions: list) -> str:
-    players_str = ", ".join(players)
-    cat_name, cat_desc = category
-    used_block = "ЭТИ ВОПРОСЫ УЖЕ БЫЛИ — НЕ ПОВТОРЯЙ:\n" + "\n".join(f"- {q}" for q in used_questions) + "\n" if used_questions else ""
-
-    prompt = f"""
-Ты придумываешь вопросы для игры "Кто скорее всего" для взрослой компании друзей 18+.
-
-ИГРОКИ: {players_str}
-
-КАТЕГОРИЯ: {cat_name}
-ТЕМА: {cat_desc}
-
-ПРАВИЛА:
-- Вопрос начинается со слов "Кто скорее всего"
-- Обязательно упомяни хотя бы одно имя игрока в вопросе — это делает игру живой и личной
-- Провокационно, смешно, немного стыдно быть выбранным
-- Конкретная ситуация, не абстрактная
-- Строго по теме категории
-- Разные уровни: от лёгкого стёба до реально пикантного
-
-ПРИМЕРЫ ХОРОШИХ ВОПРОСОВ:
-- Кто скорее всего займёт денег у Васи и "забудет" отдать?
-- Кто скорее всего напьётся первым на корпоративе?
-- Кто скорее всего изменит партнёру в командировке?
-- Кто скорее всего продаст друга за скидку на пиццу?
-- Кто скорее всего будет плакать от фильма и отрицать это?
-
-{used_block}
-Выдай ТОЛЬКО один вопрос начиная со слов "Кто скорее всего". Без кавычек, без пояснений.
-"""
-    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
-        try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.95,
-                max_tokens=100,
-            )
-            q = completion.choices[0].message.content.strip().strip('"\'«»')
-            if not q.lower().startswith("кто скорее всего"):
-                q = "Кто скорее всего " + q
-            return q
-        except Exception as e:
-            if "rate_limit" in str(e).lower():
-                continue
-            raise
-    return "Кто скорее всего опозорится первым?"
+def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -> list:
+    """Берём случайные сообщения из БД только от игроков, не повторяя использованные"""
+    if not players:
+        return []
+    player_names = list(players.values())
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            placeholders_names = ",".join(["%s"] * len(player_names))
+            placeholders_used = ",".join(["%s"] * len(used_ids)) if used_ids else "NULL"
+            query = f"""
+                SELECT id, user_name, message_text FROM history
+                WHERE chat_id = %s
+                AND user_name IN ({placeholders_names})
+                AND LENGTH(message_text) BETWEEN %s AND %s
+                AND message_text NOT LIKE '[%%'
+                {"AND id NOT IN (" + placeholders_used + ")" if used_ids else ""}
+                ORDER BY RANDOM()
+                LIMIT %s
+            """
+            params = [chat_id] + player_names + [QUOTE_MIN_MSG_LENGTH, QUOTE_MAX_MSG_LENGTH]
+            if used_ids:
+                params += used_ids
+            params.append(count)
+            cursor.execute(query, params)
+            return cursor.fetchall()  # (id, user_name, message_text)
+    finally:
+        release_conn(conn)
 
 
-def build_who_join_text(game: dict) -> str:
+def build_quote_join_text(game: dict) -> str:
     players = list(game["players"].values())
     count = len(players)
     players_str = ", ".join(f"<b>{p}</b>" for p in players) if players else "<i>пока никого нет...</i>"
     return (
-        f"🤔 <b>Игра «Кто скорее всего»</b>\n\n"
-        f"Нажми кнопку чтобы войти!\n"
-        f"Старт через {WHO_JOIN_TIMEOUT} сек после первого игрока.\n\n"
+        f"💬 <b>Игра «Угадай автора»</b>\n\n"
+        f"Я буду показывать реальные цитаты из этого чата — угадывайте кто написал!\n"
+        f"Старт через {QUOTE_JOIN_TIMEOUT} сек после первого игрока.\n\n"
         f"👥 Игроки ({count}): {players_str}"
     )
 
 
-def build_who_vote_text(game: dict) -> str:
-    question = game["current_question"]
+def build_quote_vote_text(game: dict) -> str:
+    quote = game["current_quote"]
     round_n = game["round"]
     total = game["max_rounds"]
-    categories = game.get("categories", [])
-    cat_label = categories[round_n - 1][0] if categories and round_n <= len(categories) else ""
+    votes = game["votes"]       # user_id -> guessed_name
+    players = game["players"]   # user_id -> name
 
-    votes = game["votes"]  # user_id -> target_user_id
-    players = game["players"]
+    # Считаем сколько проголосовало
+    voted_count = len(votes)
+    total_players = len(players)
 
-    # Считаем голоса за каждого
-    vote_counts = {}
-    for target_id in votes.values():
-        vote_counts[target_id] = vote_counts.get(target_id, 0) + 1
+    # Показываем кто уже проголосовал (без раскрытия ответа)
+    voted_names = [players[uid] for uid in votes if uid in players]
+    voted_str = ", ".join(voted_names) if voted_names else "—"
 
-    # Строим список: имя → сколько голосов и кто голосовал
-    results_lines = []
-    for uid, name in players.items():
-        count = vote_counts.get(uid, 0)
-        voters = [players[vid] for vid, tid in votes.items() if tid == uid and vid in players]
-        if count > 0:
-            voters_str = ", ".join(voters)
-            results_lines.append(f"  {'🔥' if count == max(vote_counts.values(), default=0) else '▪️'} <b>{name}</b> — {count} голос(а) ({voters_str})")
-        else:
-            results_lines.append(f"  ▫️ {name} — 0")
-
-    results_str = "\n".join(results_lines) if results_lines else "Ещё никто не проголосовал"
-
-    # Кто ещё не голосовал
-    voted_ids = set(votes.keys())
-    pending = [players[uid] for uid in players if uid not in voted_ids]
-    pending_str = f"\n⏳ Не голосовали: {', '.join(pending)}" if pending else ""
+    pending = [players[uid] for uid in players if uid not in votes]
+    pending_str = f"\n⏳ Ещё не ответили: {', '.join(pending)}" if pending else ""
 
     return (
-        f"🤔 <b>Раунд {round_n}/{total}</b> {cat_label}\n\n"
-        f"<b>{question}</b>\n\n"
-        f"{results_str}"
+        f"💬 <b>Раунд {round_n}/{total}</b>\n\n"
+        f"<b>Кто написал это сообщение?</b>\n\n"
+        f"<i>«{quote}»</i>\n\n"
+        f"✅ Проголосовали ({voted_count}/{total_players}): {voted_str}"
         f"{pending_str}"
     )
 
 
-def build_who_results_text(game: dict) -> str:
+def build_quote_reveal_text(game: dict) -> str:
+    """Текст после раскрытия автора"""
+    quote = game["current_quote"]
+    author = game["current_author"]
+    round_n = game["round"]
+    total = game["max_rounds"]
+    votes = game["votes"]
     players = game["players"]
-    scores = game["scores"]  # user_id -> кол-во раз выбран
+
+    # Кто угадал
+    correct = [players[uid] for uid, guess in votes.items() if guess == author and uid in players]
+    wrong = [players[uid] for uid, guess in votes.items() if guess != author and uid in players]
+
+    correct_str = ", ".join(f"<b>{n}</b>" for n in correct) if correct else "никто"
+    wrong_str = ", ".join(f"<b>{n}</b>" for n in wrong) if wrong else "—"
+
+    # Разбивка кто за кого голосовал
+    guesses_lines = []
+    # Группируем по варианту ответа
+    guess_groups = {}
+    for uid, guess in votes.items():
+        if uid in players:
+            guess_groups.setdefault(guess, []).append(players[uid])
+    for guess_name, voters in guess_groups.items():
+        marker = "✅" if guess_name == author else "❌"
+        guesses_lines.append(f"  {marker} думали что <b>{guess_name}</b>: {', '.join(voters)}")
+
+    guesses_str = "\n".join(guesses_lines) if guesses_lines else "никто не проголосовал"
+
+    return (
+        f"💬 <b>Раунд {round_n}/{total} — ответ!</b>\n\n"
+        f"<i>«{quote}»</i>\n\n"
+        f"✍️ Автор: <b>{author}</b>\n\n"
+        f"{guesses_str}\n\n"
+        f"🎯 Угадали: {correct_str}\n"
+        f"💀 Промазали: {wrong_str}"
+    )
+
+
+def build_quote_results_text(game: dict) -> str:
+    players = game["players"]
+    scores = game["scores"]
     total_rounds = game["max_rounds"]
 
     if not players:
@@ -1227,7 +1219,7 @@ def build_who_results_text(game: dict) -> str:
 
     sorted_players = sorted(players.items(), key=lambda x: scores.get(x[0], 0), reverse=True)
 
-    text = f"🏁 <b>Игра «Кто скорее всего» завершена!</b>\n\n"
+    text = f"🏁 <b>Игра «Угадай автора» завершена!</b>\n\n"
     text += f"<b>Итоги за {total_rounds} раундов:</b>\n\n"
 
     medals = ["🥇", "🥈", "🥉"]
@@ -1235,81 +1227,73 @@ def build_who_results_text(game: dict) -> str:
         count = scores.get(uid, 0)
         medal = medals[i] if i < 3 else "▪️"
         if i == len(sorted_players) - 1 and len(sorted_players) > 1:
-            medal = "😇"
+            medal = "💀"
         pct = int((count / total_rounds) * 100)
-        text += f"{medal} <b>{name}</b> — выбран {count}/{total_rounds} раз ({pct}%)\n"
+        verdict = "Телепат 🧠" if pct >= 80 else ("Знает своих 👀" if pct >= 50 else "Не угадывает 🤷")
+        text += f"{medal} <b>{name}</b> — угадал {count}/{total_rounds} ({pct}%) — {verdict}\n"
 
     if sorted_players:
         winner_uid, winner_name = sorted_players[0]
-        loser_uid, loser_name = sorted_players[-1]
         winner_count = scores.get(winner_uid, 0)
+        loser_uid, loser_name = sorted_players[-1]
         loser_count = scores.get(loser_uid, 0)
         if winner_count > 0:
-            text += f"\n🏆 <b>{winner_name}</b> — звезда вечера. Все думают именно о тебе."
+            text += f"\n🏆 <b>{winner_name}</b> — знает всех насквозь. Телепат или стукач?"
         if loser_count == 0:
-            text += f"\n😇 <b>{loser_name}</b> — либо святой, либо просто незаметный."
+            text += f"\n💀 <b>{loser_name}</b> — либо не знает людей, либо специально валит."
 
     return text
 
 
-def build_who_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
+def build_quote_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
     count = len(game["players"])
     return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text=f"🙋 Я играю! ({count})", callback_data="who_join")],
-        [types.InlineKeyboardButton(text="▶️ Начать сейчас", callback_data="who_start")],
+        [types.InlineKeyboardButton(text=f"🙋 Я играю! ({count})", callback_data="quote_join")],
+        [types.InlineKeyboardButton(text="▶️ Начать сейчас", callback_data="quote_start")],
     ])
 
 
-def build_who_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboardMarkup:
-    """Кнопки с именами игроков — себя не показываем"""
+def build_quote_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboardMarkup:
+    """Кнопки с именами игроков — все включая себя (мог написать сам)"""
     players = game["players"]
+    current_guess = game["votes"].get(voter_id)
     buttons = []
     row = []
     for uid, name in players.items():
-        if uid == voter_id:
-            continue  # за себя нельзя
-        already_voted = game["votes"].get(voter_id) == uid
-        label = f"✅ {name}" if already_voted else name
+        label = f"✅ {name}" if current_guess == name else name
         row.append(types.InlineKeyboardButton(
             text=label,
-            callback_data=f"who_vote_{uid}"
+            callback_data=f"quote_vote_{name[:20]}"  # имя как ключ
         ))
         if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    buttons.append([types.InlineKeyboardButton(text="➕ Я тоже играю!", callback_data="who_join")])
+    buttons.append([types.InlineKeyboardButton(text="➕ Я тоже играю!", callback_data="quote_join")])
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def build_who_keyboard_static() -> types.InlineKeyboardMarkup:
-    """Клавиатура для тех кто смотрит но не играет"""
-    return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="➕ Я тоже играю!", callback_data="who_join")]
-    ])
-
-
-async def who_auto_start(chat_id: int, message_id: int):
-    await asyncio.sleep(WHO_JOIN_TIMEOUT)
-    game = who_games.get(chat_id)
+async def quote_auto_start(chat_id: int, message_id: int):
+    await asyncio.sleep(QUOTE_JOIN_TIMEOUT)
+    game = quote_games.get(chat_id)
     if not game or game.get("phase") != "joining":
         return
     if len(game["players"]) < 2:
         try:
             await bot.edit_message_text(
-                "😕 Недостаточно игроков. Нужно хотя бы 2 человека.\nНапиши /who чтобы начать заново.",
+                "😕 Недостаточно игроков. Нужно хотя бы 2 человека.\nНапиши /quote чтобы начать заново.",
                 chat_id=chat_id, message_id=message_id, reply_markup=None
             )
         except Exception:
             pass
-        who_games.pop(chat_id, None)
+        quote_games.pop(chat_id, None)
         return
-    await who_start_game(chat_id, message_id)
+    await quote_start_game(chat_id, message_id)
 
 
-async def who_start_game(chat_id: int, message_id: int):
-    game = who_games.get(chat_id)
+async def quote_start_game(chat_id: int, message_id: int):
+    game = quote_games.get(chat_id)
     if not game:
         return
     if game.get("join_task") and not game["join_task"].done():
@@ -1317,73 +1301,116 @@ async def who_start_game(chat_id: int, message_id: int):
     game["phase"] = "playing"
     game["round"] = 0
     game["scores"] = {uid: 0 for uid in game["players"]}
-    await who_next_round(chat_id)
+    await quote_next_round(chat_id)
 
 
-async def who_next_round(chat_id: int):
-    game = who_games.get(chat_id)
+async def quote_next_round(chat_id: int):
+    game = quote_games.get(chat_id)
     if not game:
         return
 
     game["round"] += 1
     if game["round"] > game["max_rounds"]:
-        await who_finish(chat_id)
+        await quote_finish(chat_id)
         return
 
     game["phase"] = "voting"
     game["votes"] = {}
 
-    players_list = list(game["players"].values())
-    category = game["categories"][game["round"] - 1] if game.get("categories") else ("Разное", "любая тема")
+    # Берём случайную цитату от одного из игроков
+    quotes = get_random_quotes(chat_id, game["players"], 1, game["used_ids"])
 
-    try:
-        question = generate_who_question(players_list, category, game["used_questions"])
-        game["used_questions"].append(question)
-    except Exception as e:
-        print(f"Ошибка генерации вопроса who: {e}")
-        question = "Кто скорее всего опозорится первым?"
+    if not quotes:
+        # Если цитат не хватает — сбрасываем список использованных и пробуем снова
+        game["used_ids"] = []
+        quotes = get_random_quotes(chat_id, game["players"], 1, [])
 
-    game["current_question"] = question
-    text = build_who_vote_text(game)
+    if not quotes:
+        # Совсем нет сообщений — пропускаем раунд
+        await bot.send_message(chat_id, f"⚠️ Раунд {game['round']}: не удалось найти цитаты. Пишите больше в чат! Пропускаем...")
+        await asyncio.sleep(2)
+        await quote_next_round(chat_id)
+        return
 
-    # Отправляем сообщение — для голосования используем персональные кнопки через общую клавиатуру
-    keyboard = build_who_keyboard_static()
+    row = quotes[0]
+    msg_id, author, text = row
+    game["used_ids"].append(msg_id)
+    game["current_quote"] = text
+    game["current_author"] = author
+
+    vote_text = build_quote_vote_text(game)
+    keyboard = build_quote_keyboard_vote(game, 0)  # 0 = нет voter_id для общего показа
 
     try:
         if game.get("current_message_id"):
             await bot.edit_message_text(
-                text, chat_id=chat_id,
+                vote_text, chat_id=chat_id,
                 message_id=game["current_message_id"],
                 reply_markup=keyboard, parse_mode="HTML"
             )
         else:
-            msg = await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+            msg = await bot.send_message(chat_id, vote_text, reply_markup=keyboard, parse_mode="HTML")
             game["current_message_id"] = msg.message_id
     except Exception as e:
-        print(f"Ошибка отправки раунда who: {e}")
+        print(f"Ошибка отправки раунда quote: {e}")
         try:
-            msg = await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
+            msg = await bot.send_message(chat_id, vote_text, reply_markup=keyboard, parse_mode="HTML")
             game["current_message_id"] = msg.message_id
         except Exception:
             pass
 
-    task = asyncio.create_task(who_vote_timer(chat_id, game["round"]))
+    task = asyncio.create_task(quote_vote_timer(chat_id, game["round"]))
     game["vote_task"] = task
 
 
-async def who_vote_timer(chat_id: int, round_n: int):
-    await asyncio.sleep(WHO_VOTE_TIMEOUT)
-    game = who_games.get(chat_id)
+async def quote_vote_timer(chat_id: int, round_n: int):
+    await asyncio.sleep(QUOTE_VOTE_TIMEOUT)
+    game = quote_games.get(chat_id)
     if not game or game.get("phase") != "voting" or game.get("round") != round_n:
         return
-    await who_next_round(chat_id)
+    await quote_reveal(chat_id)
 
 
-async def who_finish(chat_id: int):
-    game = who_games.get(chat_id)
+async def quote_reveal(chat_id: int):
+    """Показываем правильный ответ и начисляем очки"""
+    game = quote_games.get(chat_id)
     if not game:
         return
-    text = build_who_results_text(game)
+
+    author = game["current_author"]
+    votes = game["votes"]
+    players = game["players"]
+
+    # Начисляем очки
+    for uid, guess in votes.items():
+        if guess == author and uid in game["scores"]:
+            game["scores"][uid] += 1
+
+    reveal_text = build_quote_reveal_text(game)
+
+    try:
+        if game.get("current_message_id"):
+            await bot.edit_message_text(
+                reveal_text, chat_id=chat_id,
+                message_id=game["current_message_id"],
+                reply_markup=None, parse_mode="HTML"
+            )
+    except Exception:
+        try:
+            await bot.send_message(chat_id, reveal_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    # Пауза перед следующим раундом
+    await asyncio.sleep(4)
+    await quote_next_round(chat_id)
+
+
+async def quote_finish(chat_id: int):
+    game = quote_games.get(chat_id)
+    if not game:
+        return
+    text = build_quote_results_text(game)
     msg_id = game.get("current_message_id")
     try:
         if msg_id:
@@ -1396,35 +1423,35 @@ async def who_finish(chat_id: int):
             await bot.send_message(chat_id, text, parse_mode="HTML")
         except Exception:
             pass
-    who_games.pop(chat_id, None)
+    quote_games.pop(chat_id, None)
 
 
-@dp.callback_query(lambda c: c.data.startswith("who_"))
-async def who_callback(callback: types.CallbackQuery):
+@dp.callback_query(lambda c: c.data.startswith("quote_"))
+async def quote_callback(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     user_id = callback.from_user.id
     user_name = callback.from_user.full_name or callback.from_user.username or "Анон"
     action = callback.data
-    game = who_games.get(chat_id)
+    game = quote_games.get(chat_id)
 
     if not game:
-        await callback.answer("Игра уже закончилась. Начни новую: /who", show_alert=False)
+        await callback.answer("Игра уже закончилась. Начни новую: /quote", show_alert=False)
         return
 
     # ── Присоединиться ──
-    if action == "who_join":
+    if action == "quote_join":
         game["players"][user_id] = user_name
         if "scores" in game and user_id not in game["scores"]:
             game["scores"][user_id] = 0
 
         if game["phase"] == "joining":
             if len(game["players"]) == 1 and not game.get("join_task"):
-                task = asyncio.create_task(who_auto_start(chat_id, callback.message.message_id))
+                task = asyncio.create_task(quote_auto_start(chat_id, callback.message.message_id))
                 game["join_task"] = task
             try:
                 await callback.message.edit_text(
-                    build_who_join_text(game),
-                    reply_markup=build_who_keyboard_join(game),
+                    build_quote_join_text(game),
+                    reply_markup=build_quote_keyboard_join(game),
                     parse_mode="HTML"
                 )
             except Exception:
@@ -1434,17 +1461,17 @@ async def who_callback(callback: types.CallbackQuery):
         elif game["phase"] == "voting":
             try:
                 await callback.message.edit_text(
-                    build_who_vote_text(game),
-                    reply_markup=build_who_keyboard_static(),
+                    build_quote_vote_text(game),
+                    reply_markup=build_quote_keyboard_vote(game, user_id),
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
-            await callback.answer(f"Добро пожаловать, {user_name}! Голосуй в личке с ботом нажав /who_vote — или жди следующего раунда!", show_alert=False)
+            await callback.answer(f"Добро пожаловать, {user_name}! Угадывай! 🎮", show_alert=False)
         return
 
     # ── Начать сейчас ──
-    if action == "who_start":
+    if action == "quote_start":
         if game["phase"] != "joining":
             await callback.answer("Игра уже идёт!", show_alert=False)
             return
@@ -1452,60 +1479,48 @@ async def who_callback(callback: types.CallbackQuery):
             await callback.answer("Нужно хотя бы 2 игрока!", show_alert=True)
             return
         await callback.answer("Поехали! 🚀", show_alert=False)
-        await who_start_game(chat_id, callback.message.message_id)
+        await quote_start_game(chat_id, callback.message.message_id)
         return
 
     # ── Голосование ──
-    if action.startswith("who_vote_"):
+    if action.startswith("quote_vote_"):
         if game["phase"] != "voting":
             await callback.answer("Голосование закончилось!", show_alert=False)
             return
 
-        target_id = int(action.replace("who_vote_", ""))
-
         if user_id not in game["players"]:
-            await callback.answer("Ты не в игре! Нажми «Я тоже играю!»", show_alert=True)
+            game["players"][user_id] = user_name
+            if "scores" in game:
+                game["scores"][user_id] = 0
+
+        guessed_name = action.replace("quote_vote_", "")
+
+        # Проверяем что такой игрок существует
+        valid_names = list(game["players"].values())
+        if guessed_name not in valid_names:
+            await callback.answer("Такого игрока нет", show_alert=True)
             return
 
-        if target_id == user_id:
-            await callback.answer("За себя голосовать нельзя 😏", show_alert=True)
-            return
+        game["votes"][user_id] = guessed_name
 
-        if target_id not in game["players"]:
-            await callback.answer("Этот игрок вышел из игры", show_alert=True)
-            return
-
-        prev_target = game["votes"].get(user_id)
-
-        # Снимаем предыдущий голос
-        if prev_target is not None and prev_target in game["scores"]:
-            game["scores"][prev_target] = max(0, game["scores"].get(prev_target, 0) - 1)
-
-        # Ставим новый
-        game["votes"][user_id] = target_id
-        game["scores"][target_id] = game["scores"].get(target_id, 0) + 1
-
-        target_name = game["players"][target_id]
-
-        # Обновляем сообщение
         try:
             await callback.message.edit_text(
-                build_who_vote_text(game),
-                reply_markup=build_who_keyboard_static(),
+                build_quote_vote_text(game),
+                reply_markup=build_quote_keyboard_vote(game, user_id),
                 parse_mode="HTML"
             )
         except Exception:
             pass
 
-        await callback.answer(f"Ты выбрал {target_name} 🎯", show_alert=False)
+        await callback.answer(f"Ты думаешь что это {guessed_name} 🤔", show_alert=False)
 
-        # Если все проголосовали — переходим досрочно
+        # Если все проголосовали — раскрываем досрочно
         all_voted = all(uid in game["votes"] for uid in game["players"])
         if all_voted and len(game["players"]) >= 2:
             if game.get("vote_task") and not game["vote_task"].done():
                 game["vote_task"].cancel()
-            await asyncio.sleep(2)
-            await who_next_round(chat_id)
+            await asyncio.sleep(1)
+            await quote_reveal(chat_id)
         return
 
     await callback.answer()
@@ -1608,9 +1623,9 @@ async def cmd_help(message: types.Message):
         "📊 /mypeepee — твоя статистика\n\n"
         "🎰 /casino — слоты (стартовые $1000)\n\n"
         "🎲 /never — игра «Я никогда не» (6 раундов)\n"
-        "🤔 /who — игра «Кто скорее всего» (6 раундов)\n\n"
+        "💬 /quote — игра «Угадай автора» (цитаты из чата)\n\n"
         "    /neverstop — остановить «Я никогда не»\n"
-        "    /whostop — остановить «Кто скорее всего»\n\n"        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
+        "    /quotestop — остановить «Угадай автора»\n\n"        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
         "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
         "👉 <b>Даяна кто виноват</b> — назначить виноватого"
     )
@@ -1669,14 +1684,14 @@ async def cmd_neverstop(message: types.Message):
     else:
         await message.answer("Никакой игры сейчас нет.")
 
-@dp.message(Command("who"))
-async def cmd_who(message: types.Message):
+@dp.message(Command("quote"))
+async def cmd_quote(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
     chat_id = message.chat.id
 
-    if chat_id in who_games:
-        game = who_games[chat_id]
+    if chat_id in quote_games:
+        game = quote_games[chat_id]
         if game["phase"] == "joining":
             await message.answer("Уже идёт сбор игроков! Нажми кнопку ниже чтобы войти.")
         else:
@@ -1686,39 +1701,39 @@ async def cmd_who(message: types.Message):
             )
         return
 
-    who_games[chat_id] = {
+    quote_games[chat_id] = {
         "phase": "joining",
         "players": {},
         "votes": {},
         "scores": {},
-        "current_question": "",
+        "current_quote": "",
+        "current_author": "",
         "round": 0,
-        "max_rounds": WHO_ROUNDS,
+        "max_rounds": QUOTE_ROUNDS,
         "current_message_id": None,
         "join_task": None,
         "vote_task": None,
-        "used_questions": [],
-        "categories": random.sample(WHO_CATEGORIES, WHO_ROUNDS),
+        "used_ids": [],
     }
 
-    game = who_games[chat_id]
+    game = quote_games[chat_id]
     msg = await message.answer(
-        build_who_join_text(game),
-        reply_markup=build_who_keyboard_join(game),
+        build_quote_join_text(game),
+        reply_markup=build_quote_keyboard_join(game),
         parse_mode="HTML"
     )
     game["current_message_id"] = msg.message_id
 
-@dp.message(Command("whostop"))
-async def cmd_whostop(message: types.Message):
+@dp.message(Command("quotestop"))
+async def cmd_quotestop(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
     chat_id = message.chat.id
-    game = who_games.pop(chat_id, None)
+    game = quote_games.pop(chat_id, None)
     if game:
         if game.get("join_task"): game["join_task"].cancel()
         if game.get("vote_task"): game["vote_task"].cancel()
-        await message.answer("🛑 Игра «Кто скорее всего» остановлена.")
+        await message.answer("🛑 Игра «Угадай автора» остановлена.")
     else:
         await message.answer("Никакой игры сейчас нет.")
 
