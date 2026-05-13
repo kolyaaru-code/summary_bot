@@ -174,8 +174,8 @@ def cleanup_old_messages():
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM history WHERE timestamp < NOW() - INTERVAL '7 days'")
-            cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '7 days'")
+            cursor.execute("DELETE FROM history WHERE timestamp < NOW() - INTERVAL '30 days'")
+            cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '30 days'")
             deleted = cursor.rowcount
         conn.commit()
         print(f"Очистка БД: удалено {deleted} старых записей")
@@ -1096,7 +1096,6 @@ async def never_callback(callback: types.CallbackQuery):
 QUOTE_JOIN_TIMEOUT = 45
 QUOTE_VOTE_TIMEOUT = 30
 QUOTE_ROUNDS = 6
-QUOTE_MIN_MSG_LENGTH = 15   # минимальная длина цитаты
 QUOTE_MAX_MSG_LENGTH = 200  # максимальная длина цитаты
 
 quote_games: dict = {}
@@ -1115,13 +1114,14 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
                 SELECT id, user_name, message_text FROM history
                 WHERE chat_id = %s
                 AND user_name IN ({placeholders_names})
-                AND LENGTH(message_text) BETWEEN %s AND %s
+                AND array_length(regexp_split_to_array(trim(message_text), '\\s+'), 1) >= 4
+                AND LENGTH(message_text) <= %s
                 AND message_text NOT LIKE '[%%'
                 {"AND id NOT IN (" + placeholders_used + ")" if used_ids else ""}
                 ORDER BY RANDOM()
                 LIMIT %s
             """
-            params = [chat_id] + player_names + [QUOTE_MIN_MSG_LENGTH, QUOTE_MAX_MSG_LENGTH]
+            params = [chat_id] + player_names + [QUOTE_MAX_MSG_LENGTH]
             if used_ids:
                 params += used_ids
             params.append(count)
