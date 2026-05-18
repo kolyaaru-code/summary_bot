@@ -901,7 +901,8 @@ async def never_next_round(chat_id: int):
 
     # Генерируем фразу через AI
     try:
-        phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"])
+        category = game["categories"][game["round"] - 1] if game.get("categories") else None
+        phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"], category)
         game["used_phrases"].append(phrase)
     except Exception as e:
         print(f"Ошибка генерации фразы: {e}")
