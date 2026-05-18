@@ -752,6 +752,8 @@ def build_never_vote_text(game: dict) -> str:
     phrase = game["current_phrase"]
     round_n = game["round"]
     total = game["max_rounds"]
+    categories = game.get("categories", [])
+    cat_label = categories[round_n - 1][0] if categories and round_n <= len(categories) else ""
 
     did_names = [game["players"][uid] for uid in game["votes"] if game["votes"][uid] == "did" and uid in game["players"]]
     never_names = [game["players"][uid] for uid in game["votes"] if game["votes"][uid] == "never" and uid in game["players"]]
@@ -1115,13 +1117,14 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
                 SELECT id, user_name, message_text FROM history
                 WHERE chat_id = %s
                 AND user_name IN ({placeholders_names})
-                AND LENGTH(message_text) BETWEEN %s AND %s
+                AND array_length(regexp_split_to_array(trim(message_text), '\\s+'), 1) >= 4
+                AND LENGTH(message_text) <= %s
                 AND message_text NOT LIKE '[%%'
                 {"AND id NOT IN (" + placeholders_used + ")" if used_ids else ""}
                 ORDER BY RANDOM()
                 LIMIT %s
             """
-            params = [chat_id] + player_names + [QUOTE_MIN_MSG_LENGTH, QUOTE_MAX_MSG_LENGTH]
+            params = [chat_id] + player_names + [QUOTE_MAX_MSG_LENGTH]
             if used_ids:
                 params += used_ids
             params.append(count)
