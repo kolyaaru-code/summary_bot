@@ -1906,9 +1906,10 @@ async def birthday_callback(callback: types.CallbackQuery):
 
         msg = await bot.send_message(
             chat_id,
-            f"{hint}📅 <b>{user_name}</b>, введи дату своего дня рождения в формате:\n\n"
+            f"{hint}📅 <b>{user_name}</b>, введи дату своего дня рождения!\n\n"
+            f"👆 <b>Нажми «Ответить» на это сообщение</b> и напиши дату в формате:\n\n"
             f"<b>ДД.ММ.ГГГГ</b>\n\n"
-            f"<i>Пример: 15.03.1995</i>",
+            f"<i>Например: 20.05.1999</i>",
             parse_mode="HTML",
             reply_markup=types.ForceReply(selective=True, input_field_placeholder="15.03.1995")
         )
