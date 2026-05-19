@@ -38,14 +38,27 @@ NEVER_JOIN_TIMEOUT = 45    # секунд на сбор игроков посл�
 NEVER_VOTE_TIMEOUT = 25    # секунд на голосование за раунд
 NEVER_ROUNDS = 6           # раундов в игре
 
+# Дни рождения — время отправки (UTC)
+BIRTHDAY_MORNING_UTC = 21  # = 00:00 МСК (UTC+3)
+BIRTHDAY_MIDDAY_UTC = 9    # = 12:00 МСК (UTC+3)
+
+# Русские названия месяцев в родительном падеже
+MONTHS_RU = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря"
+}
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 client = Groq(api_key=GROQ_KEY)
 client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))
 
 # Состояния игр "Я никогда не" — хранятся в памяти
-# chat_id -> game state dict
 never_games: dict = {}
+
+# Ожидание ввода даты ДР: (chat_id, user_id) -> message_id бота с ForceReply
+birthday_waiting: dict = {}
 
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
@@ -92,13 +105,24 @@ def init_db():
                               user_name TEXT,
                               balance INTEGER DEFAULT 1000,
                               UNIQUE(chat_id, user_id))''')
+            # НОВОЕ: таблица дней рождений
+            cursor.execute('''CREATE TABLE IF NOT EXISTS birthdays
+                             (id SERIAL PRIMARY KEY,
+                              chat_id BIGINT,
+                              user_id BIGINT,
+                              user_name TEXT,
+                              day INTEGER NOT NULL,
+                              month INTEGER NOT NULL,
+                              year INTEGER NOT NULL,
+                              UNIQUE(chat_id, user_id))''')
         conn.commit()
         print("БД инициализирована")
     finally:
         release_conn(conn)
 
 def save_message(chat_id, user_name, text):
-    text = text[:MAX_TEXT_LENGTH] if len(text) > MAX_TEXT_LENGTH else text
+    # ИСПРАВЛЕНО: упрощён избыточный тернарник
+    text = text[:MAX_TEXT_LENGTH]
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -114,7 +138,8 @@ def save_message(chat_id, user_name, text):
         release_conn(conn)
 
 def save_dayana_question(chat_id, user_name, question):
-    question = question[:500] if len(question) > 500 else question
+    # ИСПРАВЛЕНО: упрощён избыточный тернарник
+    question = question[:500]
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -174,11 +199,13 @@ def cleanup_old_messages():
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
+            # ИСПРАВЛЕНО: теперь логируем удаления из обеих таблиц отдельно
             cursor.execute("DELETE FROM history WHERE timestamp < NOW() - INTERVAL '7 days'")
+            deleted_history = cursor.rowcount
             cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '7 days'")
-            deleted = cursor.rowcount
+            deleted_dayana = cursor.rowcount
         conn.commit()
-        print(f"Очистка БД: удалено {deleted} старых записей")
+        print(f"Очистка БД: history={deleted_history}, dayana={deleted_dayana}")
     except Exception as e:
         print(f"Ошибка очистки БД: {e}")
         conn.rollback()
@@ -269,6 +296,87 @@ def get_casino_leaderboard(chat_id: int) -> list:
     finally:
         release_conn(conn)
 
+# ═══════════════════════════════════════════════
+# ДНИ РОЖДЕНИЯ — БД
+# ═══════════════════════════════════════════════
+
+def save_birthday(chat_id: int, user_id: int, user_name: str, day: int, month: int, year: int):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                INSERT INTO birthdays (chat_id, user_id, user_name, day, month, year)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    user_name = EXCLUDED.user_name,
+                    day = EXCLUDED.day,
+                    month = EXCLUDED.month,
+                    year = EXCLUDED.year
+            ''', (chat_id, user_id, user_name, day, month, year))
+        conn.commit()
+    except Exception as e:
+        print(f"Ошибка сохранения ДР: {e}")
+        conn.rollback()
+    finally:
+        release_conn(conn)
+
+def delete_birthday(chat_id: int, user_id: int) -> bool:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                'DELETE FROM birthdays WHERE chat_id = %s AND user_id = %s',
+                (chat_id, user_id)
+            )
+            deleted = cursor.rowcount
+        conn.commit()
+        return deleted > 0
+    except Exception as e:
+        print(f"Ошибка удаления ДР: {e}")
+        conn.rollback()
+        return False
+    finally:
+        release_conn(conn)
+
+def get_all_birthdays(chat_id: int) -> list:
+    """Возвращает [(user_name, day, month, year), ...]"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_name, day, month, year FROM birthdays
+                WHERE chat_id = %s ORDER BY month, day
+            ''', (chat_id,))
+            return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
+def get_todays_birthdays(chat_id: int, day: int, month: int) -> list:
+    """Возвращает [(user_id, user_name, year), ...] у кого сегодня ДР"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT user_id, user_name, year FROM birthdays
+                WHERE chat_id = %s AND day = %s AND month = %s
+            ''', (chat_id, day, month))
+            return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
+def get_user_birthday(chat_id: int, user_id: int):
+    """Возвращает (day, month, year) или None"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                'SELECT day, month, year FROM birthdays WHERE chat_id = %s AND user_id = %s',
+                (chat_id, user_id)
+            )
+            return cursor.fetchone()
+    finally:
+        release_conn(conn)
+
 # 4. КАЗИНО — СЛОТЫ
 SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
@@ -295,10 +403,10 @@ def spin_slots(bet: int) -> dict:
         third = random.choice(others)
         positions = [0, 1, 2]
         match_pos = random.sample(positions, 2)
+        # ИСПРАВЛЕНО: убрана лишняя строка, которая перезаписывала уже верное значение
         symbols = [third, third, third]
         symbols[match_pos[0]] = sym
         symbols[match_pos[1]] = sym
-        symbols[[p for p in positions if p not in match_pos][0]] = third
         multiplier = 1.1
         result_type = "pair"
     elif r < 0.96:
@@ -416,7 +524,8 @@ def build_prompt_text(rows: list) -> str:
     prev_time = None
     for r in selected:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
-        if prev_time and (r[2] - prev_time).seconds > 1800:
+        # ИСПРАВЛЕНО: .total_seconds() вместо .seconds — корректно работает для пауз любой длины
+        if prev_time and (r[2] - prev_time).total_seconds() > 1800:
             result += "\n--- пауза ---\n"
         line = f"[{time_str}] {r[0]}: {r[1]}\n"
         if len(result) + len(line) > MAX_PROMPT_CHARS:
@@ -628,6 +737,102 @@ def dayana_guilty(context: str, hint: str = None) -> str:
             raise
     raise Exception("Все модели недоступны")
 
+# ═══════════════════════════════════════════════
+# ДАЯНА — ПОЗДРАВЛЕНИЯ С ДР
+# ═══════════════════════════════════════════════
+
+def dayana_birthday_morning(name: str, age: int) -> str:
+    """Полное поздравление в полночь по МСК"""
+    age_block = f"Ему/ей сегодня исполняется {age} лет." if age else ""
+    prompt = f"""
+Ты — Даяна. Секретарша со стальными нервами и острым языком.
+Сегодня день рождения у {name}. {age_block}
+
+Поздравь его/её в своём фирменном стиле:
+- Тепло, но с характером — без приторного сюсюканья
+- Одна меткая подколка или наблюдение про именинника
+- Пожелание — искреннее, не банальное
+- 4-5 предложений максимум
+- Пиши от первого лица, на русском языке
+- Никаких "конечно!", "замечательно!", шаблонных фраз
+"""
+    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
+        try:
+            completion = client_dayana.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.9, max_tokens=400,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if "rate_limit" in str(e).lower():
+                continue
+            raise
+    return f"С днём рождения, {name}! Живи ярко — это единственное что имеет смысл."
+
+def dayana_birthday_midday(name: str, age: int) -> str:
+    """Короткое напоминание в полдень по МСК"""
+    age_block = f"({age} лет — серьёзная дата)" if age else ""
+    prompt = f"""
+Ты — Даяна. Острый язык, короткие фразы.
+Сегодня день рождения у {name} {age_block}, но многие в чате ещё не поздравили.
+Напомни об этом — коротко, с лёгким упрёком в адрес забывчивых.
+Упомяни имя именинника. 2-3 предложения максимум. На русском.
+"""
+    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
+        try:
+            completion = client_dayana.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.9, max_tokens=200,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if "rate_limit" in str(e).lower():
+                continue
+            raise
+    return f"Эй, кто ещё не поздравил {name}? Стыдно."
+
+# ═══════════════════════════════════════════════
+# УТИЛИТЫ ДР — ФОРМАТИРОВАНИЕ СПИСКА
+# ═══════════════════════════════════════════════
+
+def format_birthday_list(rows: list) -> str:
+    """Форматирует список ДР, сортируя по ближайшим от сегодня"""
+    if not rows:
+        return "🎂 <b>Дни рождения чата</b>\n\nПока никто не добавил свою дату. Начни первым!"
+
+    now = datetime.now(timezone.utc) + timedelta(hours=3)  # МСК
+    today_month = now.month
+    today_day = now.day
+    today_year = now.year
+
+    def sort_key(row):
+        _, day, month, _ = row
+        # Сколько дней осталось до следующего ДР
+        try:
+            next_bd = datetime(today_year, month, day)
+        except ValueError:
+            # 29 февраля в невисокосный год
+            next_bd = datetime(today_year, month, 28)
+        if (next_bd.month, next_bd.day) < (today_month, today_day):
+            next_bd = next_bd.replace(year=today_year + 1)
+        return (next_bd - now.replace(tzinfo=None)).days
+
+    sorted_rows = sorted(rows, key=sort_key)
+
+    text = "🎂 <b>Дни рождения чата:</b>\n\n"
+    for user_name, day, month, year in sorted_rows:
+        age = today_year - year
+        month_name = MONTHS_RU.get(month, str(month))
+        # Если ДР сегодня — выделяем
+        if month == today_month and day == today_day:
+            text += f"🎉 <b>{user_name}</b> — {day} {month_name} ({age} лет) — <b>СЕГОДНЯ!</b>\n"
+        else:
+            text += f"🎈 <b>{user_name}</b> — {day} {month_name} ({age} лет)\n"
+
+    return text
+
 # 12. УТИЛИТЫ
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
@@ -731,7 +936,6 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
 
 
 def build_never_join_text(game: dict) -> str:
-    """Текст сообщения в фазе сбора игроков"""
     players = list(game["players"].values())
     count = len(players)
     if count == 0:
@@ -748,7 +952,6 @@ def build_never_join_text(game: dict) -> str:
 
 
 def build_never_vote_text(game: dict) -> str:
-    """Текст сообщения во время голосования"""
     phrase = game["current_phrase"]
     round_n = game["round"]
     total = game["max_rounds"]
@@ -761,7 +964,6 @@ def build_never_vote_text(game: dict) -> str:
     did_str = ", ".join(f"<b>{n}</b>" for n in did_names) if did_names else "—"
     never_str = ", ".join(f"<b>{n}</b>" for n in never_names) if never_names else "—"
 
-    # Новые игроки которые ещё не проголосовали
     voted = set(game["votes"].keys())
     all_players = set(game["players"].keys())
     pending = [game["players"][uid] for uid in (all_players - voted)]
@@ -777,14 +979,12 @@ def build_never_vote_text(game: dict) -> str:
 
 
 def build_never_results_text(game: dict) -> str:
-    """Итоги всей игры"""
-    scores = game["scores"]  # user_id -> кол-во "делал"
+    scores = game["scores"]
     players = game["players"]
 
     if not players:
         return "Никто не играл 🤷"
 
-    # Сортируем по количеству "делал" (больше = опытнее жизни)
     sorted_players = sorted(players.items(), key=lambda x: scores.get(x[0], 0), reverse=True)
     total_rounds = game["max_rounds"]
 
@@ -799,7 +999,6 @@ def build_never_results_text(game: dict) -> str:
         verdict = "прожжённый" if pct >= 70 else ("бывалый" if pct >= 40 else "скромняга")
         text += f"{medal} <b>{name}</b> — делал {did_count}/{total_rounds} раз ({pct}%) — {verdict}\n"
 
-    # Самый честный (больше всех "делал")
     if sorted_players:
         winner_uid, winner_name = sorted_players[0]
         loser_uid, loser_name = sorted_players[-1]
@@ -817,7 +1016,6 @@ def build_never_results_text(game: dict) -> str:
 
 
 def build_never_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
-    """Клавиатура в фазе сбора"""
     count = len(game["players"])
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text=f"🙋 Я играю! ({count})", callback_data="never_join")],
@@ -826,7 +1024,6 @@ def build_never_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
 
 
 def build_never_keyboard_vote(game: dict) -> types.InlineKeyboardMarkup:
-    """Клавиатура для голосования + кнопка присоединиться"""
     did_count = sum(1 for v in game["votes"].values() if v == "did")
     never_count = sum(1 for v in game["votes"].values() if v == "never")
     return types.InlineKeyboardMarkup(inline_keyboard=[
@@ -839,7 +1036,6 @@ def build_never_keyboard_vote(game: dict) -> types.InlineKeyboardMarkup:
 
 
 async def never_auto_start(chat_id: int, message_id: int):
-    """Таймер автостарта после сбора игроков"""
     await asyncio.sleep(NEVER_JOIN_TIMEOUT)
     game = never_games.get(chat_id)
     if not game or game.get("phase") != "joining":
@@ -859,12 +1055,10 @@ async def never_auto_start(chat_id: int, message_id: int):
 
 
 async def never_start_game(chat_id: int, message_id: int):
-    """Запускает игру — переходим к первому раунду"""
     game = never_games.get(chat_id)
     if not game:
         return
 
-    # Отменяем таймер сбора если он ещё тикает
     if game.get("join_task") and not game["join_task"].done():
         game["join_task"].cancel()
 
@@ -877,7 +1071,6 @@ async def never_start_game(chat_id: int, message_id: int):
 
 
 async def never_next_round(chat_id: int):
-    """Запускает следующий раунд"""
     game = never_games.get(chat_id)
     if not game:
         return
@@ -890,7 +1083,6 @@ async def never_next_round(chat_id: int):
     game["phase"] = "voting"
     game["votes"] = {}
 
-    # Берём немного истории чата для вдохновения AI
     try:
         rows = get_last_messages(chat_id, limit=15)
         chat_context = format_context(rows)
@@ -899,7 +1091,6 @@ async def never_next_round(chat_id: int):
 
     players_list = list(game["players"].values())
 
-    # Генерируем фразу через AI
     try:
         category = game["categories"][game["round"] - 1] if game.get("categories") else None
         phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"], category)
@@ -914,7 +1105,6 @@ async def never_next_round(chat_id: int):
     keyboard = build_never_keyboard_vote(game)
 
     try:
-        # Редактируем существующее сообщение или шлём новое
         if game.get("current_message_id"):
             await bot.edit_message_text(
                 text, chat_id=chat_id,
@@ -932,13 +1122,11 @@ async def never_next_round(chat_id: int):
         except Exception:
             pass
 
-    # Запускаем таймер голосования
     task = asyncio.create_task(never_vote_timer(chat_id, game["round"]))
     game["vote_task"] = task
 
 
 async def never_vote_timer(chat_id: int, round_n: int):
-    """Таймер окончания голосования"""
     await asyncio.sleep(NEVER_VOTE_TIMEOUT)
     game = never_games.get(chat_id)
     if not game or game.get("phase") != "voting" or game.get("round") != round_n:
@@ -947,7 +1135,6 @@ async def never_vote_timer(chat_id: int, round_n: int):
 
 
 async def never_finish(chat_id: int):
-    """Завершает игру и показывает итоги"""
     game = never_games.get(chat_id)
     if not game:
         return
@@ -973,7 +1160,6 @@ async def never_finish(chat_id: int):
     never_games.pop(chat_id, None)
 
 
-# ── CALLBACK: КНОПКИ ИГРЫ ──
 @dp.callback_query(lambda c: c.data in ("never_join", "never_start", "never_did", "never_never"))
 async def never_callback(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
@@ -986,16 +1172,13 @@ async def never_callback(callback: types.CallbackQuery):
         await callback.answer("Игра уже закончилась. Начни новую: /never", show_alert=False)
         return
 
-    # ── Присоединиться ──
     if action == "never_join":
         game["players"][user_id] = user_name
 
-        # Инициализируем счёт для нового игрока если игра уже идёт
         if "scores" in game and user_id not in game["scores"]:
             game["scores"][user_id] = 0
 
         if game["phase"] == "joining":
-            # Запускаем таймер при первом игроке
             if len(game["players"]) == 1 and not game.get("join_task"):
                 task = asyncio.create_task(
                     never_auto_start(chat_id, callback.message.message_id)
@@ -1013,7 +1196,6 @@ async def never_callback(callback: types.CallbackQuery):
             await callback.answer(f"Ты в игре, {user_name}! 🙋", show_alert=False)
 
         elif game["phase"] == "voting":
-            # Можно присоединиться во время игры
             try:
                 await callback.message.edit_text(
                     build_never_vote_text(game),
@@ -1025,7 +1207,6 @@ async def never_callback(callback: types.CallbackQuery):
             await callback.answer(f"Добро пожаловать, {user_name}! Голосуй! 🎮", show_alert=False)
         return
 
-    # ── Начать сейчас ──
     if action == "never_start":
         if game["phase"] != "joining":
             await callback.answer("Игра уже идёт!", show_alert=False)
@@ -1037,13 +1218,11 @@ async def never_callback(callback: types.CallbackQuery):
         await never_start_game(chat_id, callback.message.message_id)
         return
 
-    # ── Голосование ──
     if action in ("never_did", "never_never"):
         if game["phase"] != "voting":
             await callback.answer("Голосование закончилось!", show_alert=False)
             return
 
-        # Если человек ещё не в игре — добавляем
         if user_id not in game["players"]:
             game["players"][user_id] = user_name
             if "scores" in game:
@@ -1058,14 +1237,11 @@ async def never_callback(callback: types.CallbackQuery):
 
         game["votes"][user_id] = vote
 
-        # Обновляем счёт
         if vote == "did":
             game["scores"][user_id] = game["scores"].get(user_id, 0) + 1
-            # Если переголосовал с "never" — убираем предыдущий счёт
             if prev_vote == "never":
-                pass  # счёт уже не менялся за "never"
+                pass
         elif vote == "never" and prev_vote == "did":
-            # Переголосовал с "did" на "never" — убираем очко
             game["scores"][user_id] = max(0, game["scores"].get(user_id, 0) - 1)
 
         try:
@@ -1080,12 +1256,11 @@ async def never_callback(callback: types.CallbackQuery):
         phrase = "Делал 🙋" if vote == "did" else "Не делал 🙅"
         await callback.answer(phrase, show_alert=False)
 
-        # Если все проголосовали — переходим к следующему раунду досрочно
         all_voted = all(uid in game["votes"] for uid in game["players"])
         if all_voted and len(game["players"]) >= 2:
             if game.get("vote_task") and not game["vote_task"].done():
                 game["vote_task"].cancel()
-            await asyncio.sleep(2)  # небольшая пауза чтобы все увидели результат
+            await asyncio.sleep(2)
             await never_next_round(chat_id)
         return
 
@@ -1099,13 +1274,12 @@ async def never_callback(callback: types.CallbackQuery):
 QUOTE_JOIN_TIMEOUT = 45
 QUOTE_VOTE_TIMEOUT = 30
 QUOTE_ROUNDS = 6
-QUOTE_MIN_MSG_LENGTH = 15   # минимальная длина цитаты
-QUOTE_MAX_MSG_LENGTH = 200  # максимальная длина цитаты
+QUOTE_MIN_MSG_LENGTH = 15
+QUOTE_MAX_MSG_LENGTH = 200
 
 quote_games: dict = {}
 
 def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -> list:
-    """Берём случайные сообщения из БД только от игроков, не повторяя использованные"""
     if not players:
         return []
     player_names = list(players.values())
@@ -1130,7 +1304,7 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
                 params += used_ids
             params.append(count)
             cursor.execute(query, params)
-            return cursor.fetchall()  # (id, user_name, message_text)
+            return cursor.fetchall()
     finally:
         release_conn(conn)
 
@@ -1151,14 +1325,12 @@ def build_quote_vote_text(game: dict) -> str:
     quote = game["current_quote"]
     round_n = game["round"]
     total = game["max_rounds"]
-    votes = game["votes"]       # user_id -> guessed_name
-    players = game["players"]   # user_id -> name
+    votes = game["votes"]
+    players = game["players"]
 
-    # Считаем сколько проголосовало
     voted_count = len(votes)
     total_players = len(players)
 
-    # Показываем кто уже проголосовал (без раскрытия ответа)
     voted_names = [players[uid] for uid in votes if uid in players]
     voted_str = ", ".join(voted_names) if voted_names else "—"
 
@@ -1175,7 +1347,6 @@ def build_quote_vote_text(game: dict) -> str:
 
 
 def build_quote_reveal_text(game: dict) -> str:
-    """Текст после раскрытия автора"""
     quote = game["current_quote"]
     author = game["current_author"]
     round_n = game["round"]
@@ -1183,20 +1354,17 @@ def build_quote_reveal_text(game: dict) -> str:
     votes = game["votes"]
     players = game["players"]
 
-    # Кто угадал
     correct = [players[uid] for uid, guess in votes.items() if guess == author and uid in players]
     wrong = [players[uid] for uid, guess in votes.items() if guess != author and uid in players]
 
     correct_str = ", ".join(f"<b>{n}</b>" for n in correct) if correct else "никто"
     wrong_str = ", ".join(f"<b>{n}</b>" for n in wrong) if wrong else "—"
 
-    # Разбивка кто за кого голосовал
-    guesses_lines = []
-    # Группируем по варианту ответа
     guess_groups = {}
     for uid, guess in votes.items():
         if uid in players:
             guess_groups.setdefault(guess, []).append(players[uid])
+    guesses_lines = []
     for guess_name, voters in guess_groups.items():
         marker = "✅" if guess_name == author else "❌"
         guesses_lines.append(f"  {marker} думали что <b>{guess_name}</b>: {', '.join(voters)}")
@@ -1258,7 +1426,6 @@ def build_quote_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
 
 
 def build_quote_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboardMarkup:
-    """Кнопки с именами игроков — все включая себя (мог написать сам)"""
     players = game["players"]
     current_guess = game["votes"].get(voter_id)
     buttons = []
@@ -1267,7 +1434,7 @@ def build_quote_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboard
         label = f"✅ {name}" if current_guess == name else name
         row.append(types.InlineKeyboardButton(
             text=label,
-            callback_data=f"quote_vote_{name[:20]}"  # имя как ключ
+            callback_data=f"quote_vote_{name[:20]}"
         ))
         if len(row) == 2:
             buttons.append(row)
@@ -1321,16 +1488,13 @@ async def quote_next_round(chat_id: int):
     game["phase"] = "voting"
     game["votes"] = {}
 
-    # Берём случайную цитату от одного из игроков
     quotes = get_random_quotes(chat_id, game["players"], 1, game["used_ids"])
 
     if not quotes:
-        # Если цитат не хватает — сбрасываем список использованных и пробуем снова
         game["used_ids"] = []
         quotes = get_random_quotes(chat_id, game["players"], 1, [])
 
     if not quotes:
-        # Совсем нет сообщений — пропускаем раунд
         await bot.send_message(chat_id, f"⚠️ Раунд {game['round']}: не удалось найти цитаты. Пишите больше в чат! Пропускаем...")
         await asyncio.sleep(2)
         await quote_next_round(chat_id)
@@ -1343,7 +1507,7 @@ async def quote_next_round(chat_id: int):
     game["current_author"] = author
 
     vote_text = build_quote_vote_text(game)
-    keyboard = build_quote_keyboard_vote(game, 0)  # 0 = нет voter_id для общего показа
+    keyboard = build_quote_keyboard_vote(game, 0)
 
     try:
         if game.get("current_message_id"):
@@ -1376,7 +1540,6 @@ async def quote_vote_timer(chat_id: int, round_n: int):
 
 
 async def quote_reveal(chat_id: int):
-    """Показываем правильный ответ и начисляем очки"""
     game = quote_games.get(chat_id)
     if not game:
         return
@@ -1385,7 +1548,6 @@ async def quote_reveal(chat_id: int):
     votes = game["votes"]
     players = game["players"]
 
-    # Начисляем очки
     for uid, guess in votes.items():
         if guess == author and uid in game["scores"]:
             game["scores"][uid] += 1
@@ -1405,7 +1567,6 @@ async def quote_reveal(chat_id: int):
         except Exception:
             pass
 
-    # Пауза перед следующим раундом
     await asyncio.sleep(4)
     await quote_next_round(chat_id)
 
@@ -1442,7 +1603,6 @@ async def quote_callback(callback: types.CallbackQuery):
         await callback.answer("Игра уже закончилась. Начни новую: /quote", show_alert=False)
         return
 
-    # ── Присоединиться ──
     if action == "quote_join":
         game["players"][user_id] = user_name
         if "scores" in game and user_id not in game["scores"]:
@@ -1474,7 +1634,6 @@ async def quote_callback(callback: types.CallbackQuery):
             await callback.answer(f"Добро пожаловать, {user_name}! Угадывай! 🎮", show_alert=False)
         return
 
-    # ── Начать сейчас ──
     if action == "quote_start":
         if game["phase"] != "joining":
             await callback.answer("Игра уже идёт!", show_alert=False)
@@ -1486,7 +1645,6 @@ async def quote_callback(callback: types.CallbackQuery):
         await quote_start_game(chat_id, callback.message.message_id)
         return
 
-    # ── Голосование ──
     if action.startswith("quote_vote_"):
         if game["phase"] != "voting":
             await callback.answer("Голосование закончилось!", show_alert=False)
@@ -1499,7 +1657,6 @@ async def quote_callback(callback: types.CallbackQuery):
 
         guessed_name = action.replace("quote_vote_", "")
 
-        # Проверяем что такой игрок существует
         valid_names = list(game["players"].values())
         if guessed_name not in valid_names:
             await callback.answer("Такого игрока нет", show_alert=True)
@@ -1518,7 +1675,6 @@ async def quote_callback(callback: types.CallbackQuery):
 
         await callback.answer(f"Ты думаешь что это {guessed_name} 🤔", show_alert=False)
 
-        # Если все проголосовали — раскрываем досрочно
         all_voted = all(uid in game["votes"] for uid in game["players"])
         if all_voted and len(game["players"]) >= 2:
             if game.get("vote_task") and not game["vote_task"].done():
@@ -1608,7 +1764,74 @@ async def handle_casino_balance(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-# 17. КОМАНДЫ БОТА
+# ═══════════════════════════════════════════════
+# 17. ФОНОВАЯ ЗАДАЧА — ПОЗДРАВЛЕНИЯ С ДР
+# ═══════════════════════════════════════════════
+
+async def birthday_checker():
+    """
+    Проверяет дни рождения каждую минуту.
+    Поздравляет в 21:00 UTC (= 00:00 МСК) и 09:00 UTC (= 12:00 МСК).
+    Хранит в памяти кого уже поздравили сегодня — дублей не будет.
+    """
+    sent_keys: set = set()  # (chat_id, user_id, "morning"/"midday", "YYYY-MM-DD")
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = datetime.now(timezone.utc)
+            today_str = now.strftime('%Y-%m-%d')
+
+            # Чистим вчерашние записи
+            sent_keys = {k for k in sent_keys if k[3] == today_str}
+
+            # Определяем период
+            period = None
+            if now.hour == BIRTHDAY_MORNING_UTC and now.minute < 5:
+                period = "morning"
+            elif now.hour == BIRTHDAY_MIDDAY_UTC and now.minute < 5:
+                period = "midday"
+
+            if not period:
+                continue
+
+            birthdays = get_todays_birthdays(ALLOWED_CHAT_ID, now.day, now.month)
+            if not birthdays:
+                continue
+
+            for user_id, user_name, year in birthdays:
+                key = (ALLOWED_CHAT_ID, user_id, period, today_str)
+                if key in sent_keys:
+                    continue
+
+                sent_keys.add(key)
+                age = now.year - year
+
+                try:
+                    if period == "morning":
+                        text = dayana_birthday_morning(user_name, age)
+                        header = f"🎂 <b>С днём рождения, {user_name}!</b>\n\n"
+                    else:
+                        text = dayana_birthday_midday(user_name, age)
+                        header = f"🎈 <b>Напоминание!</b>\n\n"
+
+                    safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    await bot.send_message(
+                        ALLOWED_CHAT_ID,
+                        f"{header}{safe_text}",
+                        parse_mode="HTML"
+                    )
+                    print(f"ДР поздравление отправлено: {user_name} ({period})")
+                except Exception as e:
+                    print(f"Ошибка поздравления ДР ({user_name}, {period}): {e}")
+
+        except Exception as e:
+            print(f"Ошибка в birthday_checker: {e}")
+
+# ═══════════════════════════════════════════════
+# 18. КОМАНДЫ БОТА
+# ═══════════════════════════════════════════════
+
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -1629,11 +1852,111 @@ async def cmd_help(message: types.Message):
         "🎲 /never — игра «Я никогда не» (6 раундов)\n"
         "💬 /quote — игра «Угадай автора» (цитаты из чата)\n\n"
         "    /neverstop — остановить «Я никогда не»\n"
-        "    /quotestop — остановить «Угадай автора»\n\n"        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
+        "    /quotestop — остановить «Угадай автора»\n\n"
+        "🎂 /birthday — дни рождения чата\n\n"
+        "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
         "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
         "👉 <b>Даяна кто виноват</b> — назначить виноватого"
     )
     await message.answer(help_text, parse_mode="HTML")
+
+# ═══════════════════════════════════════════════
+# 19. КОМАНДА /birthday И ЕЁ ОБРАБОТЧИКИ
+# ═══════════════════════════════════════════════
+
+def build_birthday_menu_keyboard() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🎂 Указать мой ДР", callback_data="bday_set")],
+        [types.InlineKeyboardButton(text="👀 Все дни рождения", callback_data="bday_list")],
+        [types.InlineKeyboardButton(text="❌ Удалить мой ДР", callback_data="bday_delete")],
+    ])
+
+@dp.message(Command("birthday"))
+async def cmd_birthday(message: types.Message):
+    if not is_chat_allowed(message.chat.id):
+        return
+    await message.answer(
+        "🎂 <b>Дни рождения чата</b>\n\nЧто хочешь сделать?",
+        reply_markup=build_birthday_menu_keyboard(),
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(lambda c: c.data.startswith("bday_"))
+async def birthday_callback(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    user_id = callback.from_user.id
+    user_name = callback.from_user.full_name or callback.from_user.username or "Анон"
+    action = callback.data
+
+    if not is_chat_allowed(chat_id):
+        await callback.answer()
+        return
+
+    # ── Указать ДР ──
+    if action == "bday_set":
+        await callback.answer()
+        # Проверяем — есть ли уже ДР у пользователя
+        existing = get_user_birthday(chat_id, user_id)
+        if existing:
+            day, month, year = existing
+            month_name = MONTHS_RU.get(month, str(month))
+            hint = f"Сейчас у тебя сохранено: <b>{day} {month_name} {year} г.</b>\nОтправь новую дату чтобы обновить.\n\n"
+        else:
+            hint = ""
+
+        msg = await bot.send_message(
+            chat_id,
+            f"{hint}📅 <b>{user_name}</b>, введи дату своего дня рождения в формате:\n\n"
+            f"<b>ДД.ММ.ГГГГ</b>\n\n"
+            f"<i>Пример: 15.03.1995</i>",
+            parse_mode="HTML",
+            reply_markup=types.ForceReply(selective=True, input_field_placeholder="15.03.1995")
+        )
+        # Запоминаем что ждём ответ от этого пользователя
+        birthday_waiting[(chat_id, user_id)] = msg.message_id
+        return
+
+    # ── Список всех ДР ──
+    if action == "bday_list":
+        await callback.answer()
+        rows = get_all_birthdays(chat_id)
+        text = format_birthday_list(rows)
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=build_birthday_menu_keyboard(),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await bot.send_message(chat_id, text, parse_mode="HTML",
+                                   reply_markup=build_birthday_menu_keyboard())
+        return
+
+    # ── Удалить ДР ──
+    if action == "bday_delete":
+        deleted = delete_birthday(chat_id, user_id)
+        if deleted:
+            await callback.answer("✅ Твой день рождения удалён.", show_alert=True)
+            # Обновляем список
+            rows = get_all_birthdays(chat_id)
+            text = format_birthday_list(rows)
+            try:
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=build_birthday_menu_keyboard(),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        else:
+            await callback.answer("У тебя не было сохранённого ДР.", show_alert=True)
+        return
+
+    await callback.answer()
+
+# ═══════════════════════════════════════════════
+# 20. КОМАНДЫ ИГР
+# ═══════════════════════════════════════════════
 
 @dp.message(Command("never"))
 async def cmd_never(message: types.Message):
@@ -1641,7 +1964,6 @@ async def cmd_never(message: types.Message):
         return
     chat_id = message.chat.id
 
-    # Если игра уже идёт — сообщаем
     if chat_id in never_games:
         game = never_games[chat_id]
         if game["phase"] == "joining":
@@ -1653,12 +1975,11 @@ async def cmd_never(message: types.Message):
             )
         return
 
-    # Создаём новую игру
     never_games[chat_id] = {
         "phase": "joining",
-        "players": {},          # user_id -> name
-        "votes": {},            # user_id -> "did" | "never"
-        "scores": {},           # user_id -> int
+        "players": {},
+        "votes": {},
+        "scores": {},
         "current_phrase": "",
         "round": 0,
         "max_rounds": NEVER_ROUNDS,
@@ -1881,20 +2202,62 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# 18. СБОР СООБЩЕНИЙ
+# ═══════════════════════════════════════════════
+# 21. СБОР СООБЩЕНИЙ (главный хэндлер)
+# ═══════════════════════════════════════════════
+
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
+
+    # Определяем автора
     if message.sender_chat:
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
+        user_id = None
     elif message.from_user:
         if message.from_user.is_bot:
             return
         author = message.from_user.full_name or message.from_user.username or "Аноним"
+        user_id = message.from_user.id
     else:
         return
 
+    # ── Проверяем: ответ на ForceReply для ввода ДР ──
+    if (message.reply_to_message and user_id and message.text):
+        waiting_key = (message.chat.id, user_id)
+        expected_msg_id = birthday_waiting.get(waiting_key)
+        if expected_msg_id and message.reply_to_message.message_id == expected_msg_id:
+            # Это ответ на наш запрос даты ДР
+            del birthday_waiting[waiting_key]
+            raw = message.text.strip()
+            try:
+                dt = datetime.strptime(raw, "%d.%m.%Y")
+                now_year = datetime.now().year
+                if dt.year < 1900 or dt.year >= now_year:
+                    await message.reply(
+                        f"⚠️ Год должен быть между 1900 и {now_year - 1}.\n"
+                        f"Попробуй снова через /birthday"
+                    )
+                    return
+                save_birthday(message.chat.id, user_id, author, dt.day, dt.month, dt.year)
+                age = now_year - dt.year
+                month_name = MONTHS_RU.get(dt.month, str(dt.month))
+                await message.reply(
+                    f"✅ Запомнил! День рождения <b>{author}</b> — {dt.day} {month_name} {dt.year} г. ({age} лет)\n"
+                    f"Поздравлю тебя в этот день 🎂"
+                    parse_mode="HTML"
+                )
+            except ValueError:
+                await message.reply(
+                    "⚠️ Не могу распознать дату. Используй формат <b>ДД.ММ.ГГГГ</b>\n"
+                    "Например: <code>15.03.1995</code>\n\n"
+                    "Попробуй снова через /birthday",
+                    parse_mode="HTML"
+                )
+            return
+
+    # ── Обработка текстовых сообщений с упоминанием Даяны ──
     if message.text:
         text_lower = message.text.lower()
 
@@ -1952,6 +2315,7 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
 
+    # ── Сохраняем в историю ──
     if message.text:
         save_message(message.chat.id, author, message.text)
         print(f"[{author}]: {message.text}")
@@ -1967,6 +2331,10 @@ async def main():
     init_db()
     cleanup_old_messages()
     print("Бот запущен и готов к работе!")
+
+    # Запускаем фоновую задачу проверки ДР
+    asyncio.create_task(birthday_checker())
+    print("Планировщик дней рождений запущен")
 
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/result", handle_result)
