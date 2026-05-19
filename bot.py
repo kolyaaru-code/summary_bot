@@ -39,7 +39,7 @@ NEVER_VOTE_TIMEOUT = 25    # секунд на голосование за ра�
 NEVER_ROUNDS = 6           # раундов в игре
 
 # Дни рождения — время отправки (UTC)
-BIRTHDAY_MORNING_UTC = 21  # = 00:00 МСК (UTC+3)
+BIRTHDAY_MORNING_UTC = 23  # = 02:00 МСК (UTC+3)
 BIRTHDAY_MIDDAY_UTC = 9    # = 12:00 МСК (UTC+3)
 
 # Русские названия месяцев в родительном падеже
@@ -1797,7 +1797,8 @@ async def birthday_checker():
             if not period:
                 continue
 
-            birthdays = get_todays_birthdays(ALLOWED_CHAT_ID, now.day, now.month)
+            now_msk = now + timedelta(hours=3)
+            birthdays = get_todays_birthdays(ALLOWED_CHAT_ID, now_msk.day, now_msk.month)
             if not birthdays:
                 continue
 
