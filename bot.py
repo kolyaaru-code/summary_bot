@@ -824,6 +824,8 @@ def format_birthday_list(rows: list) -> str:
     text = "🎂 <b>Дни рождения чата:</b>\n\n"
     for user_name, day, month, year in sorted_rows:
         age = today_year - year
+        if (month, day) > (today_month, today_day):
+            age -= 1
         month_name = MONTHS_RU.get(month, str(month))
         # Если ДР сегодня — выделяем
         if month == today_month and day == today_day:
