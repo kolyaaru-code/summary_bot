@@ -2244,8 +2244,8 @@ async def collect_messages(message: types.Message):
                 age = now_year - dt.year
                 month_name = MONTHS_RU.get(dt.month, str(dt.month))
                 await message.reply(
-                    f"✅ Запомнил! День рождения <b>{author}</b> — {dt.day} {month_name} {dt.year} г. ({age} лет)\n"
-                    f"Поздравлю тебя в этот день 🎂"
+                    f"✅ Запомнил! День рождения <b>{author}</b> \u2014 {dt.day} {month_name} {dt.year} г. ({age} лет)\n"
+                    f"Поздравлю тебя в этот день 🎂",
                     parse_mode="HTML"
                 )
             except ValueError:
