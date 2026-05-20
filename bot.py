@@ -39,7 +39,7 @@ NEVER_VOTE_TIMEOUT = 25    # секунд на голосование за ра�
 NEVER_ROUNDS = 6           # раундов в игре
 
 # Дни рождения — время отправки (UTC)
-BIRTHDAY_MORNING_UTC = 23  # = 02:00 МСК (UTC+3)
+BIRTHDAY_MORNING_UTC = 5  # = 02:00 МСК (UTC+3)
 BIRTHDAY_MIDDAY_UTC = 9    # = 12:00 МСК (UTC+3)
 
 # Русские названия месяцев в родительном падеже
