@@ -704,6 +704,69 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
     raise Exception("Все модели исчерпали лимит.")
 
 # 9. ДАЯНА — ВОПРОС
+def _dayana_complete(
+    prompt: str,
+    ds_model: str = "deepseek-v4-flash",
+    thinking: bool = False,
+    groq_models: list = None,
+    temperature: float = 0.8,
+    max_tokens: int = 800,
+    fallback_text: str = None,
+):
+    """
+    Единый диспетчер запросов Даяны.
+
+    Путь 1 (основной): DeepSeek.
+        - ds_model: "deepseek-v4-flash" (дёшево) или "deepseek-v4-pro" (умнее).
+        - thinking=True включает встроенное рассуждение модели. В этом режиме
+          мы берём ТОЛЬКО .content (финальный ответ), а .reasoning_content
+          (размышления вслух) игнорируем — в чат он не попадает.
+        - В thinking-режиме temperature не действует (так устроен DeepSeek),
+          поэтому передаём её только в non-thinking.
+    Путь 2 (резерв): Groq со старым перебором моделей и costылями.
+    Путь 3 (последний): если всё легло — fallback_text (для поздравлений),
+        иначе пробрасываем ошибку.
+    """
+    # ── Путь 1: DeepSeek ──
+    if client_deepseek is not None:
+        try:
+            kwargs = {
+                "model": ds_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+            }
+            if thinking:
+                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+            else:
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                kwargs["temperature"] = temperature
+            completion = client_deepseek.chat.completions.create(**kwargs)
+            return completion.choices[0].message.content
+        except Exception as e:
+            print(f"DeepSeek (Даяна) недоступен ({e}), откатываюсь на Groq...")
+
+    # ── Путь 2: Groq-резерв ──
+    if groq_models is None:
+        groq_models = ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]
+    for model in groq_models:
+        try:
+            completion = client_dayana.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature, max_tokens=max_tokens,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "model" in str(e).lower():
+                print(f"Даяна: {model} недоступна, переключаюсь...")
+                continue
+            raise
+
+    # ── Путь 3: совсем всё легло ──
+    if fallback_text is not None:
+        return fallback_text
+    raise Exception("Все модели недоступны")
+
 def ask_dayana(question: str) -> str:
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами и острым языком.
@@ -713,12 +776,14 @@ def ask_dayana(question: str) -> str:
 
 ВОПРОС: {question}
 """
-    completion = client_dayana.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.8, max_tokens=800,
+    # Flash + thinking: Даяна думает перед ответом → меньше глупых ответов.
+    return _dayana_complete(
+        prompt,
+        ds_model="deepseek-v4-flash",
+        thinking=True,
+        temperature=0.8,
+        max_tokens=800,
     )
-    return completion.choices[0].message.content
 
 # 10. ДАЯНА — РАССУДИТЬ
 def dayana_judge(context: str, hint: str = None) -> str:
@@ -745,20 +810,15 @@ def dayana_judge(context: str, hint: str = None) -> str:
 
 Вынеси вердикт.
 """
-    for model in ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]:
-        try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7, max_tokens=600,
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            if "rate_limit" in str(e).lower() or "model" in str(e).lower():
-                print(f"Даяна рассуди: {model} недоступна, переключаюсь...")
-                continue
-            raise
-    raise Exception("Все модели недоступны")
+    # Pro + thinking: судья споров — взвесить стороны, логичный вердикт.
+    return _dayana_complete(
+        prompt,
+        ds_model="deepseek-v4-pro",
+        thinking=True,
+        groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
+        temperature=0.7,
+        max_tokens=600,
+    )
 
 # 11. ДАЯНА — ВИНОВАТ
 def dayana_guilty(context: str, hint: str = None) -> str:
@@ -783,20 +843,15 @@ def dayana_guilty(context: str, hint: str = None) -> str:
 
 Назначь виноватого.
 """
-    for model in ["qwen/qwen3-32b", "llama-3.3-70b-versatile"]:
-        try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7, max_tokens=500,
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            if "rate_limit" in str(e).lower() or "model" in str(e).lower():
-                print(f"Даяна виноват: {model} недоступна, переключаюсь...")
-                continue
-            raise
-    raise Exception("Все модели недоступны")
+    # Pro + thinking: разобрать кто реально виноват, а не назначить наугад.
+    return _dayana_complete(
+        prompt,
+        ds_model="deepseek-v4-pro",
+        thinking=True,
+        groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
+        temperature=0.7,
+        max_tokens=500,
+    )
 
 # ═══════════════════════════════════════════════
 # ДАЯНА — ПОЗДРАВЛЕНИЯ С ДР
@@ -817,19 +872,16 @@ def dayana_birthday_morning(name: str, age: int) -> str:
 - Пиши от первого лица, на русском языке
 - Никаких "конечно!", "замечательно!", шаблонных фраз
 """
-    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
-        try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.9, max_tokens=400,
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            if "rate_limit" in str(e).lower():
-                continue
-            raise
-    return f"С днём рождения, {name}! Живи ярко — это единственное что имеет смысл."
+    # Flash non-thinking: творческое поздравление, рассуждение не нужно.
+    return _dayana_complete(
+        prompt,
+        ds_model="deepseek-v4-flash",
+        thinking=False,
+        groq_models=["llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        temperature=0.9,
+        max_tokens=400,
+        fallback_text=f"С днём рождения, {name}! Живи ярко — это единственное что имеет смысл.",
+    )
 
 def dayana_birthday_midday(name: str, age: int) -> str:
     """Короткое напоминание в полдень по МСК"""
@@ -840,19 +892,16 @@ def dayana_birthday_midday(name: str, age: int) -> str:
 Напомни об этом — коротко, с лёгким упрёком в адрес забывчивых.
 Упомяни имя именинника. 2-3 предложения максимум. На русском.
 """
-    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
-        try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.9, max_tokens=200,
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            if "rate_limit" in str(e).lower():
-                continue
-            raise
-    return f"Эй, кто ещё не поздравил {name}? Стыдно."
+    # Flash non-thinking: короткое напоминание, рассуждение не нужно.
+    return _dayana_complete(
+        prompt,
+        ds_model="deepseek-v4-flash",
+        thinking=False,
+        groq_models=["llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        temperature=0.9,
+        max_tokens=200,
+        fallback_text=f"Эй, кто ещё не поздравил {name}? Стыдно.",
+    )
 
 # ═══════════════════════════════════════════════
 # УТИЛИТЫ ДР — ФОРМАТИРОВАНИЕ СПИСКА
@@ -2347,9 +2396,9 @@ async def collect_messages(message: types.Message):
                 idx = text_lower.index("рассуди") + len("рассуди")
                 hint = message.text[idx:].strip() or None
                 if message.reply_to_message and message.reply_to_message.date:
-                    rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 15, 8)
+                    rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 40, 15)
                 else:
-                    rows = get_last_messages(message.chat.id, limit=25)
+                    rows = get_last_messages(message.chat.id, limit=60)
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
@@ -2366,9 +2415,9 @@ async def collect_messages(message: types.Message):
                 idx = text_lower.index("виноват") + len("виноват")
                 hint = message.text[idx:].strip() or None
                 if message.reply_to_message and message.reply_to_message.date:
-                    rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 12, 6)
+                    rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 30, 10)
                 else:
-                    rows = get_last_messages(message.chat.id, limit=20)
+                    rows = get_last_messages(message.chat.id, limit=45)
                 if not rows:
                     await message.reply("Не в чем разбираться — чат пустой.")
                     return
