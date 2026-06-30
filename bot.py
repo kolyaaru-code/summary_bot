@@ -741,7 +741,13 @@ def _dayana_complete(
                 kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
                 kwargs["temperature"] = temperature
             completion = client_deepseek.chat.completions.create(**kwargs)
-            return completion.choices[0].message.content
+            answer = completion.choices[0].message.content
+            # В thinking-режиме модель может потратить весь лимит на
+            # рассуждение и вернуть пустой content. Не отдаём пустоту в чат —
+            # проваливаемся в Groq-резерв (Путь 2), он пустым не ответит.
+            if answer and answer.strip():
+                return answer
+            print("DeepSeek вернул пустой ответ (thinking съел лимит?), откатываюсь на Groq...")
         except Exception as e:
             print(f"DeepSeek (Даяна) недоступен ({e}), откатываюсь на Groq...")
 
@@ -782,7 +788,7 @@ def ask_dayana(question: str) -> str:
         ds_model="deepseek-v4-flash",
         thinking=True,
         temperature=0.8,
-        max_tokens=800,
+        max_tokens=1500,
     )
 
 # 10. ДАЯНА — РАССУДИТЬ
@@ -817,7 +823,7 @@ def dayana_judge(context: str, hint: str = None) -> str:
         thinking=True,
         groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
         temperature=0.7,
-        max_tokens=600,
+        max_tokens=1500,
     )
 
 # 11. ДАЯНА — ВИНОВАТ
@@ -850,7 +856,7 @@ def dayana_guilty(context: str, hint: str = None) -> str:
         thinking=True,
         groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
         temperature=0.7,
-        max_tokens=500,
+        max_tokens=1500,
     )
 
 # ═══════════════════════════════════════════════
@@ -2374,6 +2380,18 @@ async def collect_messages(message: types.Message):
     # ── Обработка текстовых сообщений с упоминанием Даяны ──
     if message.text:
         text_lower = message.text.lower()
+
+        # Должен идти ПЕРВЫМ среди команд Даяны, иначе "создал" может
+        # зацепиться обработчиком "ответь" и уйти в ИИ.
+        if "даяна" in text_lower and ("создал" in text_lower or "создала" in text_lower or "кто тебя сделал" in text_lower):
+            await message.reply(
+                "<b>Даяна:</b>\n\n"
+                "Меня создал Николай. Если нужно что-то подобное или есть идея — "
+                'пиши ему: <a href="https://t.me/tbmosa">связаться</a>.',
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
 
         if "даяна" in text_lower and "ответь" in text_lower:
             try:
