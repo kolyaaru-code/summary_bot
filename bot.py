@@ -10,6 +10,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from dotenv import load_dotenv
 from groq import Groq
+from openai import OpenAI
 from psycopg2 import pool
 from aiohttp import web
 import hmac
@@ -53,6 +54,20 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 client = Groq(api_key=GROQ_KEY)
 client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))
+
+# DeepSeek — основная модель для саммари и Даяны.
+# Совместим с OpenAI SDK: меняется только base_url.
+# Если ключа нет в окружении — клиент будет None, и весь код
+# автоматически откатится на Groq (резерв со старыми костылями).
+DEEPSEEK_KEY = os.getenv("DEEPSEEK_KEY")
+if DEEPSEEK_KEY:
+    client_deepseek = OpenAI(
+        api_key=DEEPSEEK_KEY,
+        base_url="https://api.deepseek.com",
+    )
+else:
+    client_deepseek = None
+    print("⚠️ DEEPSEEK_KEY не найден — саммари работает на Groq (резерв).")
 
 # Состояния игр "Я никогда не" — хранятся в памяти
 never_games: dict = {}
@@ -542,6 +557,20 @@ def format_context(rows: list) -> str:
         result += f"[{time_str}] {r[0]}: {r[1]}\n"
     return result
 
+def format_full_log(rows: list) -> str:
+    """Полный лог чата для DeepSeek — БЕЗ сэмплинга и обрезки.
+    Окно 1M токенов позволяет отдать всё. Сохраняем маркеры пауз
+    между сообщениями, чтобы Батя чувствовал ритм беседы."""
+    result = ""
+    prev_time = None
+    for r in rows:
+        time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
+        if prev_time and (r[2] - prev_time).total_seconds() > 1800:
+            result += "\n--- пауза ---\n"
+        result += f"[{time_str}] {r[0]}: {r[1]}\n"
+        prev_time = r[2]
+    return result
+
 # 6. ТРАНСКРИБАЦИЯ ГОЛОСА
 async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str | None:
     size_mb = file_size / (1024 * 1024)
@@ -590,14 +619,16 @@ def get_dayana_block(questions: list) -> str:
         return "\n".join([f"• {q[0]} спрашивал(а): {q[1]}" for q in questions])
 
 # 8. САММАРИ
-def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
+def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count: int) -> str:
+    """Собирает промпт Бати. Текст сообщений подставляется снаружи —
+    для DeepSeek это полный лог, для Groq — урезанный сэмплинг."""
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток."
     elif message_count < 50:
         volume_instruction = "Средняя активность — стандартный разбор."
     else:
         volume_instruction = "Чат бурлил — можешь развернуться, но без воды."
-    prompt = f"""
+    return f"""
 Ты — Батя этого чата. Не модератор, не ведущий, не журналист. Батя.
 Ты знаешь всех в лицо, помнишь кто что говорил месяц назад и не даёшь никому забыть об этом.
 
@@ -627,6 +658,36 @@ def get_ai_summary(messages_text: str, timeframe_text: str, message_count: int):
 ВОТ ЧТО БЫЛО В ЧАТЕ:
 {messages_text}
 """
+
+
+def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
+    """
+    Главная функция саммари. Принимает СЫРЫЕ строки из БД.
+
+    Путь 1 (основной): DeepSeek — весь лог чата целиком, без сэмплинга.
+                       Окно 1M токенов, поэтому ничего не выбрасываем.
+    Путь 2 (резерв):   Groq — старый сэмплинг 40/20/40 + обрезка.
+                       Срабатывает, если DeepSeek недоступен.
+    """
+
+    # ── Путь 1: DeepSeek с полным контекстом ──
+    if client_deepseek is not None:
+        try:
+            full_text = format_full_log(rows)
+            prompt = _build_summary_prompt(full_text, timeframe_text, message_count)
+            completion = client_deepseek.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.85,
+                max_tokens=2000,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            print(f"DeepSeek недоступен ({e}), откатываюсь на Groq...")
+
+    # ── Путь 2: Groq-резерв со старыми костылями ──
+    sampled_text = build_prompt_text(rows)  # старый сэмплинг живёт здесь
+    prompt = _build_summary_prompt(sampled_text, timeframe_text, message_count)
     for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"]:
         try:
             completion = client.chat.completions.create(
@@ -2193,7 +2254,7 @@ async def cmd_summary(message: types.Message):
         await status_msg.edit_text("За это время сообщений нет. Либо вы спите, либо я сломался.")
         return
     try:
-        raw_summary = get_ai_summary(build_prompt_text(all_rows), f"{hours} ч.", len(all_rows))
+        raw_summary = get_ai_summary(all_rows, f"{hours} ч.", len(all_rows))
         safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         full_text = f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}"
         dayana_questions = get_dayana_questions(message.chat.id, hours)
