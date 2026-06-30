@@ -214,13 +214,13 @@ def cleanup_old_messages():
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            # ИСПРАВЛЕНО: теперь логируем удаления из обеих таблиц отдельно
-            cursor.execute("DELETE FROM history WHERE timestamp < NOW() - INTERVAL '7 days'")
-            deleted_history = cursor.rowcount
-            cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '7 days'")
+            # ИСТОРИЮ ЧАТА БОЛЬШЕ НЕ УДАЛЯЕМ — это память Даяны ("вспомни").
+            # Удаляем только служебные вопросы к Даяне, и то с запасом в 30 дней
+            # (раньше было 7) — они нужны лишь для блока в саммари.
+            cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '30 days'")
             deleted_dayana = cursor.rowcount
         conn.commit()
-        print(f"Очистка БД: history={deleted_history}, dayana={deleted_dayana}")
+        print(f"Очистка БД: история сохраняется навсегда, dayana_questions удалено={deleted_dayana}")
     except Exception as e:
         print(f"Ошибка очистки БД: {e}")
         conn.rollback()
@@ -2387,7 +2387,7 @@ async def collect_messages(message: types.Message):
             await message.reply(
                 "<b>Даяна:</b>\n\n"
                 "Меня создал Николай. Если нужно что-то подобное или есть идея — "
-                'пиши ему: <a href="https://t.me/tbmosa">связаться</a>.',
+                'пиши ему: <a href="https://t.me/YOUR_USERNAME">связаться</a>.',
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
@@ -2487,4 +2487,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())пш
