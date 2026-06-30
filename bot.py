@@ -773,6 +773,17 @@ def _dayana_complete(
         return fallback_text
     raise Exception("Все модели недоступны")
 
+# Пул сносок-дисклеймеров для "Даяна ответь" — в её стиле, лаконично.
+# Подставляется случайно, чтобы не примелькалось.
+DAYANA_DISCLAIMERS = [
+    "Я ИИ, иногда несу чушь. Проверяй.",
+    "ИИ. Могу и ошибиться — не на меня потом пеняй.",
+    "Я бот. Бывает, путаю. Думай своей головой.",
+    "ИИ, не оракул. Могу ошибаться.",
+    "Я не гугл и не энциклопедия. Сверяйся сам.",
+    "ИИ — значит, могу налажать. Учти.",
+]
+
 def ask_dayana(question: str) -> str:
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами и острым языком.
@@ -783,13 +794,18 @@ def ask_dayana(question: str) -> str:
 ВОПРОС: {question}
 """
     # Flash + thinking: Даяна думает перед ответом → меньше глупых ответов.
-    return _dayana_complete(
+    answer = _dayana_complete(
         prompt,
         ds_model="deepseek-v4-flash",
         thinking=True,
         temperature=0.8,
         max_tokens=1500,
     )
+    # Дисклеймер приклеивается ВСЕГДА (и для DeepSeek, и для Groq-резерва).
+    # Курсив накладывается в обработчике — там, где идёт HTML-экранирование,
+    # чтобы тег не попал под escape вместе с текстом ответа.
+    disclaimer = random.choice(DAYANA_DISCLAIMERS)
+    return f"{answer}[[DISCLAIMER]]{disclaimer}"
 
 # 10. ДАЯНА — РАССУДИТЬ
 def dayana_judge(context: str, hint: str = None) -> str:
@@ -2402,7 +2418,13 @@ async def collect_messages(message: types.Message):
                     return
                 save_dayana_question(message.chat.id, author, question)
                 answer = ask_dayana(question)
-                safe_answer = answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                if "[[DISCLAIMER]]" in answer:
+                    main_part, disclaimer_part = answer.split("[[DISCLAIMER]]", 1)
+                else:
+                    main_part, disclaimer_part = answer, None
+                safe_answer = main_part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                if disclaimer_part:
+                    safe_answer += f"\n\n<i>{disclaimer_part}</i>"
                 await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
             except Exception as e:
                 print(f"Ошибка Даяны (ответь): {e}")
@@ -2464,7 +2486,7 @@ async def main():
     cleanup_old_messages()
     print("Бот запущен и готов к работе!")
 
-    # Запускаем фоновую задачу проверки Дня рождения
+    # Запускаем фоновую задачу проверки ДР
     asyncio.create_task(birthday_checker())
     print("Планировщик дней рождений запущен")
 
