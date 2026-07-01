@@ -693,7 +693,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.85, max_tokens=1500,
+                temperature=0.85, max_tokens=15000,
             )
             return completion.choices[0].message.content
         except Exception as e:
@@ -799,7 +799,7 @@ def ask_dayana(question: str) -> str:
         ds_model="deepseek-v4-flash",
         thinking=True,
         temperature=0.8,
-        max_tokens=1500,
+        max_tokens=15000,
     )
     # Дисклеймер приклеивается ВСЕГДА (и для DeepSeek, и для Groq-резерва).
     # Курсив накладывается в обработчике — там, где идёт HTML-экранирование,
@@ -839,7 +839,7 @@ def dayana_judge(context: str, hint: str = None) -> str:
         thinking=True,
         groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
         temperature=0.7,
-        max_tokens=1500,
+        max_tokens=15000,
     )
 
 # 11. ДАЯНА — ВИНОВАТ
@@ -872,7 +872,7 @@ def dayana_guilty(context: str, hint: str = None) -> str:
         thinking=True,
         groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
         temperature=0.7,
-        max_tokens=1500,
+        max_tokens=15000,
     )
 
 # ═══════════════════════════════════════════════
