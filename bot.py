@@ -2403,7 +2403,7 @@ async def collect_messages(message: types.Message):
             await message.reply(
                 "<b>Даяна:</b>\n\n"
                 "Меня создал Николай. Если нужно что-то подобное или есть идея — "
-                'пиши ему: <a href="https://t.me/YOUR_USERNAME">связаться</a>.',
+                'пиши ему: <a href="https://t.me/tbmosa">связаться</a>.',
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
