@@ -2401,7 +2401,7 @@ async def collect_messages(message: types.Message):
         # зацепиться обработчиком "ответь" и уйти в ИИ.
         if "даяна" in text_lower and ("создал" in text_lower or "создала" in text_lower or "кто тебя сделал" in text_lower):
             await message.reply(
-                "<b>Даяна:</b>\n\n"
+                "<b>Даяна: </b>\n\n"
                 "Меня создал Николай. Если нужно что-то подобное или есть идея — "
                 'пиши ему: <a href="https://t.me/tbmosa">связаться</a>.',
                 parse_mode="HTML",
