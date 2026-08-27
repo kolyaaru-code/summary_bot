@@ -694,42 +694,65 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 
 def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
     """
-    Главная функция саммари. Принимает СЫРЫЕ строки из БД.
+    Главная функция саммари. 
+    ВЕРСИЯ С УСИЛЕННЫМ ЛОГИРОВАНИЕМ ДЛЯ ОТЛАДКИ.
     """
+    import traceback # Для вывода глубоких системных ошибок
+
+    print(f"\n--- [LOG] СТАРТ САММАРИ: Сообщений: {message_count}, Период: {timeframe_text} ---")
+
     # ── Путь 1: DeepSeek с полным контекстом ──
     if client_deepseek is not None:
         try:
             full_text = format_full_log(rows)
             prompt = _build_summary_prompt(full_text, timeframe_text, message_count)
+            print(f"[LOG] DeepSeek: Длина отправляемого текста = {len(prompt)} символов.")
+            
             completion = client_deepseek.chat.completions.create(
-                model="deepseek-v4-flash",  # Оставляем твою рабочую модель
+                model="deepseek-v4-flash", 
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
                 max_tokens=2000,
             )
-            return completion.choices[0].message.content
+            
+            answer = completion.choices[0].message.content
+            print(f"[LOG] DeepSeek: Ответ получен. Длина = {len(answer) if answer else 0} символов.")
+            print(f"[LOG] DeepSeek RAW ответ: {repr(answer)}") # Покажет скрытые символы и пустоту
+            
+            if answer and answer.strip():
+                return answer
+            else:
+                print("[LOG] ⚠️ DeepSeek вернул абсолютно пустую строку! Иду к резерву...")
         except Exception as e:
-            print(f"DeepSeek недоступен ({e}), откатываюсь на Groq...")
+            print(f"[LOG] ❌ DeepSeek УПАЛ с ошибкой: {type(e).__name__} - {e}")
+            traceback.print_exc() # Выведет точную строку ошибки
 
     # ── Путь 2: Groq-резерв со старыми костылями ──
     sampled_text = build_prompt_text(rows)
     prompt = _build_summary_prompt(sampled_text, timeframe_text, message_count)
+    print(f"[LOG] Groq: Длина урезанного текста = {len(prompt)} символов.")
     
-    # Резервный список моделей Groq
     for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"]:
         try:
+            print(f"[LOG] Groq: Пробую модель {model}...")
             completion = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.85, max_tokens=15000,
+                temperature=0.85, 
+                max_tokens=4000, 
             )
-            return completion.choices[0].message.content
+            answer = completion.choices[0].message.content
+            print(f"[LOG] Groq ({model}): Ответ получен. Длина = {len(answer) if answer else 0} символов.")
+            
+            if answer and answer.strip():
+                return answer
+            else:
+                print(f"[LOG] ⚠️ Groq ({model}) вернул пустую строку!")
         except Exception as e:
-            # ТЕПЕРЬ ПЕРЕКЛЮЧАЕТСЯ ПРИ ЛЮБОЙ ОШИБКЕ (даже если модель недоступна/удалена)
-            print(f"Groq: Ошибка с моделью {model}, переключаюсь на следующую... Ошибка: {e}")
+            print(f"[LOG] ❌ Groq ({model}) ОШИБКА: {type(e).__name__} - {e}")
             continue
             
-    raise Exception("Все резервные модели Groq упали.")
+    raise Exception("Все резервные модели упали или вернули пустоту. Смотри логи выше.")
 
 # 9. ДАЯНА — ВОПРОС
 def _dayana_complete(
