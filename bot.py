@@ -227,6 +227,35 @@ def cleanup_old_messages():
     finally:
         release_conn(conn)
 
+def get_random_active_user(chat_id: int, days: int = 7) -> str:
+    """Выбирает случайного участника, который писал в последние N дней."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('''
+                SELECT DISTINCT user_name FROM history
+                WHERE chat_id = %s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                ORDER BY RANDOM() LIMIT 1
+            ''', (chat_id, days))
+            row = cursor.fetchone()
+            return row[0] if row else "ребята"
+    except Exception as e:
+        print(f"Ошибка получения юзера: {e}")
+        return "ребята"
+    finally:
+        release_conn(conn)
+
+def get_last_message_time(chat_id: int):
+    """Узнает время последнего сообщения в чате."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('SELECT timestamp FROM history WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 1', (chat_id,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+    finally:
+        release_conn(conn)
+
 def update_peepee_score(chat_id: int, user_id: int, user_name: str, won: bool):
     conn = get_conn()
     try:
@@ -608,14 +637,17 @@ def get_dayana_block(questions: list) -> str:
 Выдай только список, без заголовков и вступлений.
 """
     try:
-        completion = client_dayana.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.85, max_tokens=400,
+        # Перевели на диспетчера. DeepSeek теперь используется и здесь!
+        return _dayana_complete(
+            prompt=prompt,
+            ds_model="deepseek-v4-flash",  # Оставляем твою рабочую модель
+            thinking=False,
+            groq_models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"], # Актуальные резервы
+            temperature=0.85,
+            max_tokens=800,
         )
-        return completion.choices[0].message.content
     except Exception as e:
-        print(f"Ошибка блока Даяны: {e}")
+        print(f"Ошибка блока Даяны (get_dayana_block): {e}")
         return "\n".join([f"• {q[0]} спрашивал(а): {q[1]}" for q in questions])
 
 # 8. САММАРИ
@@ -663,20 +695,14 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
     """
     Главная функция саммари. Принимает СЫРЫЕ строки из БД.
-
-    Путь 1 (основной): DeepSeek — весь лог чата целиком, без сэмплинга.
-                       Окно 1M токенов, поэтому ничего не выбрасываем.
-    Путь 2 (резерв):   Groq — старый сэмплинг 40/20/40 + обрезка.
-                       Срабатывает, если DeepSeek недоступен.
     """
-
     # ── Путь 1: DeepSeek с полным контекстом ──
     if client_deepseek is not None:
         try:
             full_text = format_full_log(rows)
             prompt = _build_summary_prompt(full_text, timeframe_text, message_count)
             completion = client_deepseek.chat.completions.create(
-                model="deepseek-v4-flash",
+                model="deepseek-v4-flash",  # Оставляем твою рабочую модель
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
                 max_tokens=2000,
@@ -686,8 +712,10 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             print(f"DeepSeek недоступен ({e}), откатываюсь на Groq...")
 
     # ── Путь 2: Groq-резерв со старыми костылями ──
-    sampled_text = build_prompt_text(rows)  # старый сэмплинг живёт здесь
+    sampled_text = build_prompt_text(rows)
     prompt = _build_summary_prompt(sampled_text, timeframe_text, message_count)
+    
+    # Резервный список моделей Groq
     for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"]:
         try:
             completion = client.chat.completions.create(
@@ -697,11 +725,11 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             )
             return completion.choices[0].message.content
         except Exception as e:
-            if "rate_limit_exceeded" in str(e):
-                print(f"Модель {model} исчерпала лимит, переключаюсь...")
-                continue
-            raise
-    raise Exception("Все модели исчерпали лимит.")
+            # ТЕПЕРЬ ПЕРЕКЛЮЧАЕТСЯ ПРИ ЛЮБОЙ ОШИБКЕ (даже если модель недоступна/удалена)
+            print(f"Groq: Ошибка с моделью {model}, переключаюсь на следующую... Ошибка: {e}")
+            continue
+            
+    raise Exception("Все резервные модели Groq упали.")
 
 # 9. ДАЯНА — ВОПРОС
 def _dayana_complete(
@@ -874,6 +902,35 @@ def dayana_guilty(context: str, hint: str = None) -> str:
         temperature=0.7,
         max_tokens=15000,
     )
+
+# 11.5 ДАЯНА — АКТИВНОСТЬ (УТРО, ВЕЧЕР, РЕАНИМАТОР)
+def dayana_generate_morning(user_name: str) -> str:
+    prompt = f"""
+Ты — Даяна. Секретарша со стальными нервами и острым языком.
+Сейчас утро. Пожелай чату доброго утра в своем фирменном стиле (без приторности).
+Обратись лично к участнику по имени {user_name} и дай ему забавное, дерзкое или ироничное пожелание/предсказание на сегодняшний день.
+Отвечай коротко: 2-4 предложения. На русском языке.
+"""
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"Доброе утро всем. {user_name}, постарайся сегодня не облажаться.")
+
+def dayana_generate_evening(user_name: str) -> str:
+    prompt = f"""
+Ты — Даяна. Секретарша со стальными нервами.
+Сейчас вечер, рабочий день закончен. Спроси у чата, как прошел их день.
+Обязательно обратись к {user_name} с каким-нибудь интересным, нестандартным или ироничным вопросом про его день или планы на вечер.
+Отвечай коротко: 2-4 предложения. На русском языке.
+"""
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"Вечер в хату. Как день прошел? {user_name}, ты хоть что-то полезное сегодня сделал?")
+
+def dayana_generate_bait(context: str) -> str:
+    prompt = f"""
+Ты — Даяна. Чат молчит уже несколько часов. Твоя задача — вкинуть тему, чтобы заставить всех общаться.
+Прочитай последние сообщения, и если там есть за что зацепиться — продолжи тему резким тейком. Если контекст скучный — вкинь провокационный вопрос (отношения, деньги, жизненные дилеммы).
+Не пиши "почему вы молчите" или "как погода". Сразу бей вопросом.
+ПОСЛЕДНИЕ СООБЩЕНИЯ:
+{context}
+"""
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Чат уснул? Пора просыпаться, расскажите хоть что-нибудь интересное.")
 
 # ═══════════════════════════════════════════════
 # ДАЯНА — ПОЗДРАВЛЕНИЯ С ДР
@@ -1963,6 +2020,60 @@ async def birthday_checker():
         except Exception as e:
             print(f"Ошибка в birthday_checker: {e}")
 
+async def dayana_activity_manager():
+    """Управляет утренними, вечерними и реанимационными вбросами Даяны."""
+    current_date = None
+    morning_min, evening_min = 0, 0
+    morning_done, evening_done, bait_done = False, False, False
+
+    while True:
+        await asyncio.sleep(60)  # Проверяем каждую минуту
+        try:
+            now = datetime.now(timezone.utc)
+            now_msk = now + timedelta(hours=3)
+            today_str = now_msk.strftime('%Y-%m-%d')
+
+            # Новый день — сбрасываем флаги и генерируем случайные минуты
+            if current_date != today_str:
+                current_date = today_str
+                morning_min = random.randint(0, 59)
+                evening_min = random.randint(0, 59)
+                morning_done, evening_done, bait_done = False, False, False
+
+            # 1. ДОБРОЕ УТРО (09:00 - 10:00)
+            if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
+                user = get_random_active_user(ALLOWED_CHAT_ID)
+                text = dayana_generate_morning(user)
+                safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
+                morning_done = True
+                continue
+
+            # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
+            if now_msk.hour == 21 and now_msk.minute >= evening_min and not evening_done:
+                user = get_random_active_user(ALLOWED_CHAT_ID)
+                text = dayana_generate_evening(user)
+                safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
+                evening_done = True
+                continue
+
+            # 3. РЕАНИМАТОР ЧАТА (Строго с 10:00 до 21:00)
+            if 10 <= now_msk.hour < 21 and not bait_done:
+                last_msg_time = get_last_message_time(ALLOWED_CHAT_ID)
+                if last_msg_time:
+                    diff = now - last_msg_time
+                    if diff.total_seconds() > 5 * 3600:  # 5 часов тишины
+                        rows = get_last_messages(ALLOWED_CHAT_ID, limit=10)
+                        context = format_context(rows) if rows else "Тишина..."
+                        text = dayana_generate_bait(context)
+                        safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
+                        bait_done = True
+
+        except Exception as e:
+            print(f"Ошибка в dayana_activity_manager: {e}")
+
 # ═══════════════════════════════════════════════
 # 18. КОМАНДЫ БОТА
 # ═══════════════════════════════════════════════
@@ -2489,6 +2600,10 @@ async def main():
     # Запускаем фоновую задачу проверки ДР
     asyncio.create_task(birthday_checker())
     print("Планировщик дней рождений запущен")
+
+    # Запускаем фоновую задачу активности Даяны
+    asyncio.create_task(dayana_activity_manager())
+    print("Менеджер активности Даяны запущен")
 
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_post("/result", handle_result)
