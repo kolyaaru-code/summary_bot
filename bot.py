@@ -232,9 +232,11 @@ def get_random_active_user(chat_id: int, days: int = 7) -> str:
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
+            # ИСПРАВЛЕНО: Используем GROUP BY вместо DISTINCT для совместимости с RANDOM()
             cursor.execute('''
-                SELECT DISTINCT user_name FROM history
+                SELECT user_name FROM history
                 WHERE chat_id = %s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                GROUP BY user_name
                 ORDER BY RANDOM() LIMIT 1
             ''', (chat_id, days))
             row = cursor.fetchone()
@@ -426,44 +428,46 @@ SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
 def spin_slots(bet: int) -> dict:
     """
-    ВРЕМЕННЫЙ ДОБРЫЙ РЕЖИМ (АТТРАКЦИОН НЕСЛЫХАННОЙ ЩЕДРОСТИ):
-      40%  — все разные (проигрыш, x0) - было 78%
-      20%  — два одинаковых (x1.1)
-      15%  — 🍒🍒🍒 (x2)
-      10%  — 🍋🍋🍋 (x3.5)
-       8%  — 7️⃣7️⃣7️⃣ (x10)
-       5%  — 💎💎💎 (x7)
-       2%  — 🍆🍆🍆 (x20, джекпот) - выпадает в 20 раз чаще!
+    Режим "казино всегда побеждает":
+      78%  — все разные (проигрыш, x0)
+      13%  — два одинаковых (x1.1)
+       5%  — 🍒🍒🍒 (x2)
+      2.5% — 🍋🍋🍋 (x3.5)
+       1%  — 7️⃣7️⃣7️⃣ (x10)
+      0.4% — 💎💎💎 (x7)
+      0.1% — 🍆🍆🍆 (x20, джекпот)
+    Матожидание ~0.57$. Казино забирает 43%.
     """
     r = random.random()
-    if r < 0.40:
+    if r < 0.78:
         symbols = random.sample(SLOT_SYMBOLS, 3)
         multiplier = 0
         result_type = "lose"
-    elif r < 0.60:
+    elif r < 0.91:
         sym = random.choice(SLOT_SYMBOLS)
         others = [s for s in SLOT_SYMBOLS if s != sym]
         third = random.choice(others)
         positions = [0, 1, 2]
         match_pos = random.sample(positions, 2)
+        # ИСПРАВЛЕНО: убрана лишняя строка, которая перезаписывала уже верное значение
         symbols = [third, third, third]
         symbols[match_pos[0]] = sym
         symbols[match_pos[1]] = sym
         multiplier = 1.1
         result_type = "pair"
-    elif r < 0.75:
+    elif r < 0.96:
         symbols = ['🍒', '🍒', '🍒']
         multiplier = 2
         result_type = "win"
-    elif r < 0.85:
+    elif r < 0.985:
         symbols = ['🍋', '🍋', '🍋']
         multiplier = 3.5
         result_type = "win"
-    elif r < 0.93:
+    elif r < 0.995:
         symbols = ['7️⃣', '7️⃣', '7️⃣']
         multiplier = 10
         result_type = "bigwin"
-    elif r < 0.98:
+    elif r < 0.999:
         symbols = ['💎', '💎', '💎']
         multiplier = 7
         result_type = "bigwin"
@@ -925,14 +929,21 @@ def dayana_guilty(context: str, hint: str = None) -> str:
     )
 
 # 11.5 ДАЯНА — АКТИВНОСТЬ (УТРО, ВЕЧЕР, РЕАНИМАТОР)
-def dayana_generate_morning(user_name: str) -> str:
-    prompt = f"""
+def dayana_generate_morning_general() -> str:
+    prompt = """
 Ты — Даяна. Секретарша со стальными нервами и острым языком.
 Сейчас утро. Пожелай чату доброго утра в своем фирменном стиле (без приторности).
-Обратись лично к участнику по имени {user_name} и дай ему забавное, дерзкое или ироничное пожелание/предсказание на сегодняшний день.
-Отвечай коротко: 2-4 предложения. На русском языке.
+Пиши коротко: 1-2 предложения. На русском языке. НИ К КОМУ ЛИЧНО НЕ ОБРАЩАЙСЯ, просто поприветствуй всех.
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"Доброе утро всем. {user_name}, постарайся сегодня не облажаться.")
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Доброе утро. Надеюсь, сегодня вы будете продуктивнее, чем вчера.")
+
+def dayana_generate_morning_personal(user_name: str) -> str:
+    prompt = f"""
+Ты — Даяна. Ты только что поздоровалась со всем чатом.
+Теперь обратись лично к участнику по имени {user_name} и дай ему забавное, дерзкое или ироничное персональное напутствие/предсказание на сегодняшний день.
+Отвечай коротко: 1-2 предложения. На русском языке.
+"""
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"А персонально тебе, {user_name}, советую сегодня не принимать важных решений.")
 
 def dayana_generate_evening(user_name: str) -> str:
     prompt = f"""
