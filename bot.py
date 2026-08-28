@@ -84,7 +84,17 @@ def init_db_pool():
     print("Пул соединений с БД создан")
 
 def get_conn():
-    return db_pool.getconn()
+    conn = db_pool.getconn()
+    try:
+        # Пингуем базу, чтобы убедиться, что сервер Railway не бросил трубку
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception:
+        # Если база сбросила соединение из-за долгой тишины (EOF detected)
+        # Закрываем этот мертвый канал связи и запрашиваем у пула новый, свежий
+        db_pool.putconn(conn, close=True)
+        conn = db_pool.getconn()
+    return conn
 
 def release_conn(conn):
     db_pool.putconn(conn)
@@ -945,14 +955,21 @@ def dayana_generate_morning_personal(user_name: str) -> str:
 """
     return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"А персонально тебе, {user_name}, советую сегодня не принимать важных решений.")
 
-def dayana_generate_evening(user_name: str) -> str:
-    prompt = f"""
+def dayana_generate_evening_general() -> str:
+    prompt = """
 Ты — Даяна. Секретарша со стальными нервами.
 Сейчас вечер, рабочий день закончен. Спроси у чата, как прошел их день.
-Обязательно обратись к {user_name} с каким-нибудь интересным, нестандартным или ироничным вопросом про его день или планы на вечер.
-Отвечай коротко: 2-4 предложения. На русском языке.
+Пиши коротко: 1-2 предложения. На русском языке. НИ К КОМУ ЛИЧНО НЕ ОБРАЩАЙСЯ, просто кинь общий вопрос всем.
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"Вечер в хату. Как день прошел? {user_name}, ты хоть что-то полезное сегодня сделал?")
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Вечер в хату, коллеги. Кто сегодня выжил, а кто сгорел на работе?")
+
+def dayana_generate_evening_personal(user_name: str) -> str:
+    prompt = f"""
+Ты — Даяна. Ты только что спросила весь чат о том, как прошел день.
+Теперь обратись лично к участнику по имени {user_name} с ироничным, нестандартным или дерзким вопросом про его планы на вечер.
+Отвечай коротко: 1-2 предложения. На русском языке.
+"""
+    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"А ты, {user_name}, опять будешь весь вечер смотреть в стену?")
 
 def dayana_generate_bait(context: str) -> str:
     prompt = f"""
@@ -2083,10 +2100,21 @@ async def dayana_activity_manager():
 
             # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
             if now_msk.hour == 21 and now_msk.minute >= evening_min and not evening_done:
+                # Первое сообщение: Общий вопрос
+                text_general = dayana_generate_evening_general()
+                safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
+                
+                # Делаем паузу 4 секунды (эффект набора текста)
+                await asyncio.sleep(4)
+                
+                # Второе сообщение: Персональный вопрос
                 user = get_random_active_user(ALLOWED_CHAT_ID)
-                text = dayana_generate_evening(user)
-                safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
+                text_personal = dayana_generate_evening_personal(user)
+                safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                # Отправляем без заголовка, как логичное продолжение
+                await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
+                
                 evening_done = True
                 continue
 
