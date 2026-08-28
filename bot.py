@@ -2089,12 +2089,23 @@ async def dayana_activity_manager():
                 evening_min = random.randint(0, 59)
                 morning_done, evening_done, bait_done = False, False, False
 
-            # 1. ДОБРОЕ УТРО (09:00 - 10:00)
-            if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
+            # 1. ВРЕМЕННОЕ ДОБРОЕ УТРО (10:30 - 11:00)
+            if now_msk.hour == 10 and now_msk.minute >= 30 and not morning_done:
+                # Первое сообщение: Общее приветствие
+                text_general = dayana_generate_morning_general()
+                safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
+                
+                # Делаем паузу 4 секунды (эффект набора текста)
+                await asyncio.sleep(4)
+                
+                # Второе сообщение: Персональный панч
                 user = get_random_active_user(ALLOWED_CHAT_ID)
-                text = dayana_generate_morning(user)
-                safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
+                text_personal = dayana_generate_morning_personal(user)
+                safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                # Отправляем без заголовка, как логичное продолжение
+                await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
+                
                 morning_done = True
                 continue
 
