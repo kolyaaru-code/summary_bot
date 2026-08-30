@@ -2090,7 +2090,14 @@ async def dayana_activity_manager():
                 morning_done, evening_done, bait_done = False, False, False
 
             # 1. ВРЕМЕННОЕ ДОБРОЕ УТРО (10:30 - 11:00)
-            if now_msk.hour == 10 and now_msk.minute >= 30 and not morning_done:
+            if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
+                # СНАЧАЛА стучимся в БД. Если она спит, код прервется здесь и попробует через минуту.
+                # В чат ничего не отправится, пока БД не проснется и не даст реальное имя.
+                user = get_random_active_user(ALLOWED_CHAT_ID)
+                
+                # Если мы дошли сюда, значит БД работает. Сразу ставим галочку, чтобы избежать дублей.
+                morning_done = True
+                
                 # Первое сообщение: Общее приветствие
                 text_general = dayana_generate_morning_general()
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -2100,17 +2107,21 @@ async def dayana_activity_manager():
                 await asyncio.sleep(4)
                 
                 # Второе сообщение: Персональный панч
-                user = get_random_active_user(ALLOWED_CHAT_ID)
                 text_personal = dayana_generate_morning_personal(user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 # Отправляем без заголовка, как логичное продолжение
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
                 
-                morning_done = True
                 continue
 
             # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
             if now_msk.hour == 21 and now_msk.minute >= evening_min and not evening_done:
+                # СНАЧАЛА стучимся в БД.
+                user = get_random_active_user(ALLOWED_CHAT_ID)
+                
+                # БД ответила - ставим галочку.
+                evening_done = True
+                
                 # Первое сообщение: Общий вопрос
                 text_general = dayana_generate_evening_general()
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -2120,13 +2131,11 @@ async def dayana_activity_manager():
                 await asyncio.sleep(4)
                 
                 # Второе сообщение: Персональный вопрос
-                user = get_random_active_user(ALLOWED_CHAT_ID)
                 text_personal = dayana_generate_evening_personal(user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 # Отправляем без заголовка, как логичное продолжение
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
                 
-                evening_done = True
                 continue
 
             # 3. РЕАНИМАТОР ЧАТА (Строго с 10:00 до 21:00)
