@@ -2089,7 +2089,7 @@ async def dayana_activity_manager():
                 evening_min = random.randint(0, 59)
                 morning_done, evening_done, bait_done = False, False, False
 
-            # 1. ВРЕМЕННОЕ ДОБРОЕ УТРО (10:30 - 11:00)
+            # 1. ДОБРОЕ УТРО (9: - 10:00)
             if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
                 # СНАЧАЛА стучимся в БД. Если она спит, код прервется здесь и попробует через минуту.
                 # В чат ничего не отправится, пока БД не проснется и не даст реальное имя.
