@@ -751,7 +751,7 @@ def _dayana_complete(
             print(f"DeepSeek (Даяна) недоступен ({e}), откатываюсь на Groq...")
 
     if groq_models is None:
-        groq_models = ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]
+        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     for model in groq_models:
         try:
             completion = client_dayana.chat.completions.create(
@@ -891,9 +891,9 @@ def dayana_advise(topic: str, user_name: str) -> str:
         prompt=prompt,
         ds_model="deepseek-v4-flash",
         thinking=True,
-        groq_models=["llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        groq_models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
         temperature=0.8,
-        max_tokens=800,
+        max_tokens=8192,
         fallback_text="Мой главный совет на сегодня: начни думать своей головой, а не перекладывать выбор на бота.",
     )
 
