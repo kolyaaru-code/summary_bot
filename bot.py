@@ -41,7 +41,7 @@ NEVER_ROUNDS = 6           # раундов в игре
 
 # Дни рождения — время отправки (UTC)
 BIRTHDAY_MORNING_UTC = 5  # = 02:00 МСК (UTC+3)
-BIRTHDAY_MIDDAY_UTC = 9    # = 12:00 МСК (UTC+3)
+BIRTHDAY_MIDDAY_UTC = 9   # = 12:00 МСК (UTC+3)
 
 # Русские названия месяцев в родительном падеже
 MONTHS_RU = {
@@ -56,9 +56,6 @@ client = Groq(api_key=GROQ_KEY)
 client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))
 
 # DeepSeek — основная модель для саммари и Даяны.
-# Совместим с OpenAI SDK: меняется только base_url.
-# Если ключа нет в окружении — клиент будет None, и весь код
-# автоматически откатится на Groq (резерв со старыми костылями).
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_KEY")
 if DEEPSEEK_KEY:
     client_deepseek = OpenAI(
@@ -75,6 +72,9 @@ never_games: dict = {}
 # Ожидание ввода даты ДР: (chat_id, user_id) -> message_id бота с ForceReply
 birthday_waiting: dict = {}
 
+# Ожидание ввода темы для совета: (chat_id, user_id) -> message_id бота с ForceReply
+advice_waiting: dict = {}
+
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
 
@@ -86,12 +86,9 @@ def init_db_pool():
 def get_conn():
     conn = db_pool.getconn()
     try:
-        # Пингуем базу, чтобы убедиться, что сервер Railway не бросил трубку
         with conn.cursor() as cursor:
             cursor.execute("SELECT 1")
     except Exception:
-        # Если база сбросила соединение из-за долгой тишины (EOF detected)
-        # Закрываем этот мертвый канал связи и запрашиваем у пула новый, свежий
         db_pool.putconn(conn, close=True)
         conn = db_pool.getconn()
     return conn
@@ -130,7 +127,6 @@ def init_db():
                               user_name TEXT,
                               balance INTEGER DEFAULT 1000,
                               UNIQUE(chat_id, user_id))''')
-            # НОВОЕ: таблица дней рождений
             cursor.execute('''CREATE TABLE IF NOT EXISTS birthdays
                              (id SERIAL PRIMARY KEY,
                               chat_id BIGINT,
@@ -146,7 +142,6 @@ def init_db():
         release_conn(conn)
 
 def save_message(chat_id, user_name, text):
-    # ИСПРАВЛЕНО: упрощён избыточный тернарник
     text = text[:MAX_TEXT_LENGTH]
     conn = get_conn()
     try:
@@ -163,7 +158,6 @@ def save_message(chat_id, user_name, text):
         release_conn(conn)
 
 def save_dayana_question(chat_id, user_name, question):
-    # ИСПРАВЛЕНО: упрощён избыточный тернарник
     question = question[:500]
     conn = get_conn()
     try:
@@ -224,9 +218,6 @@ def cleanup_old_messages():
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            # ИСТОРИЮ ЧАТА БОЛЬШЕ НЕ УДАЛЯЕМ — это память Даяны ("вспомни").
-            # Удаляем только служебные вопросы к Даяне, и то с запасом в 30 дней
-            # (раньше было 7) — они нужны лишь для блока в саммари.
             cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '30 days'")
             deleted_dayana = cursor.rowcount
         conn.commit()
@@ -238,11 +229,9 @@ def cleanup_old_messages():
         release_conn(conn)
 
 def get_random_active_user(chat_id: int, days: int = 7) -> str:
-    """Выбирает случайного участника, который писал в последние N дней."""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            # ИСПРАВЛЕНО: Используем GROUP BY вместо DISTINCT для совместимости с RANDOM()
             cursor.execute('''
                 SELECT user_name FROM history
                 WHERE chat_id = %s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
@@ -258,7 +247,6 @@ def get_random_active_user(chat_id: int, days: int = 7) -> str:
         release_conn(conn)
 
 def get_last_message_time(chat_id: int):
-    """Узнает время последнего сообщения в чате."""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -352,10 +340,7 @@ def get_casino_leaderboard(chat_id: int) -> list:
     finally:
         release_conn(conn)
 
-# ═══════════════════════════════════════════════
 # ДНИ РОЖДЕНИЯ — БД
-# ═══════════════════════════════════════════════
-
 def save_birthday(chat_id: int, user_id: int, user_name: str, day: int, month: int, year: int):
     conn = get_conn()
     try:
@@ -395,7 +380,6 @@ def delete_birthday(chat_id: int, user_id: int) -> bool:
         release_conn(conn)
 
 def get_all_birthdays(chat_id: int) -> list:
-    """Возвращает [(user_name, day, month, year), ...]"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -408,7 +392,6 @@ def get_all_birthdays(chat_id: int) -> list:
         release_conn(conn)
 
 def get_todays_birthdays(chat_id: int, day: int, month: int) -> list:
-    """Возвращает [(user_id, user_name, year), ...] у кого сегодня ДР"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -421,7 +404,6 @@ def get_todays_birthdays(chat_id: int, day: int, month: int) -> list:
         release_conn(conn)
 
 def get_user_birthday(chat_id: int, user_id: int):
-    """Возвращает (day, month, year) или None"""
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -437,17 +419,6 @@ def get_user_birthday(chat_id: int, user_id: int):
 SLOT_SYMBOLS = ['🍒', '🍋', '7️⃣', '💎', '🍆']
 
 def spin_slots(bet: int) -> dict:
-    """
-    Режим "казино всегда побеждает":
-      78%  — все разные (проигрыш, x0)
-      13%  — два одинаковых (x1.1)
-       5%  — 🍒🍒🍒 (x2)
-      2.5% — 🍋🍋🍋 (x3.5)
-       1%  — 7️⃣7️⃣7️⃣ (x10)
-      0.4% — 💎💎💎 (x7)
-      0.1% — 🍆🍆🍆 (x20, джекпот)
-    Матожидание ~0.57$. Казино забирает 43%.
-    """
     r = random.random()
     if r < 0.78:
         symbols = random.sample(SLOT_SYMBOLS, 3)
@@ -459,7 +430,6 @@ def spin_slots(bet: int) -> dict:
         third = random.choice(others)
         positions = [0, 1, 2]
         match_pos = random.sample(positions, 2)
-        # ИСПРАВЛЕНО: убрана лишняя строка, которая перезаписывала уже верное значение
         symbols = [third, third, third]
         symbols[match_pos[0]] = sym
         symbols[match_pos[1]] = sym
@@ -580,7 +550,6 @@ def build_prompt_text(rows: list) -> str:
     prev_time = None
     for r in selected:
         time_str = (r[2] + timedelta(hours=TIMEZONE_OFFSET)).strftime('%H:%M')
-        # ИСПРАВЛЕНО: .total_seconds() вместо .seconds — корректно работает для пауз любой длины
         if prev_time and (r[2] - prev_time).total_seconds() > 1800:
             result += "\n--- пауза ---\n"
         line = f"[{time_str}] {r[0]}: {r[1]}\n"
@@ -599,9 +568,6 @@ def format_context(rows: list) -> str:
     return result
 
 def format_full_log(rows: list) -> str:
-    """Полный лог чата для DeepSeek — БЕЗ сэмплинга и обрезки.
-    Окно 1M токенов позволяет отдать всё. Сохраняем маркеры пауз
-    между сообщениями, чтобы Батя чувствовал ритм беседы."""
     result = ""
     prev_time = None
     for r in rows:
@@ -649,12 +615,11 @@ def get_dayana_block(questions: list) -> str:
 Выдай только список, без заголовков и вступлений.
 """
     try:
-        # Перевели на диспетчера. DeepSeek теперь используется и здесь!
         return _dayana_complete(
             prompt=prompt,
-            ds_model="deepseek-v4-flash",  # Оставляем твою рабочую модель
+            ds_model="deepseek-v4-flash",
             thinking=False,
-            groq_models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"], # Актуальные резервы
+            groq_models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
             temperature=0.85,
             max_tokens=800,
         )
@@ -664,8 +629,6 @@ def get_dayana_block(questions: list) -> str:
 
 # 8. САММАРИ
 def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count: int) -> str:
-    """Собирает промпт Бати. Текст сообщений подставляется снаружи —
-    для DeepSeek это полный лог, для Groq — урезанный сэмплинг."""
     if message_count < 10:
         volume_instruction = "Сообщений мало — будь краток."
     elif message_count < 50:
@@ -703,17 +666,10 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 {messages_text}
 """
 
-
 def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
-    """
-    Главная функция саммари. 
-    ВЕРСИЯ С УСИЛЕННЫМ ЛОГИРОВАНИЕМ ДЛЯ ОТЛАДКИ.
-    """
-    import traceback # Для вывода глубоких системных ошибок
-
+    import traceback
     print(f"\n--- [LOG] СТАРТ САММАРИ: Сообщений: {message_count}, Период: {timeframe_text} ---")
 
-    # ── Путь 1: DeepSeek с полным контекстом ──
     if client_deepseek is not None:
         try:
             full_text = format_full_log(rows)
@@ -729,7 +685,6 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             
             answer = completion.choices[0].message.content
             print(f"[LOG] DeepSeek: Ответ получен. Длина = {len(answer) if answer else 0} символов.")
-            print(f"[LOG] DeepSeek RAW ответ: {repr(answer)}") # Покажет скрытые символы и пустоту
             
             if answer and answer.strip():
                 return answer
@@ -737,9 +692,8 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 print("[LOG] ⚠️ DeepSeek вернул абсолютно пустую строку! Иду к резерву...")
         except Exception as e:
             print(f"[LOG] ❌ DeepSeek УПАЛ с ошибкой: {type(e).__name__} - {e}")
-            traceback.print_exc() # Выведет точную строку ошибки
+            traceback.print_exc()
 
-    # ── Путь 2: Groq-резерв со старыми костылями ──
     sampled_text = build_prompt_text(rows)
     prompt = _build_summary_prompt(sampled_text, timeframe_text, message_count)
     print(f"[LOG] Groq: Длина урезанного текста = {len(prompt)} символов.")
@@ -766,7 +720,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             
     raise Exception("Все резервные модели упали или вернули пустоту. Смотри логи выше.")
 
-# 9. ДАЯНА — ВОПРОС
+# 9. ДАЯНА — ОБЩИЙ ДИСПЕТЧЕР
 def _dayana_complete(
     prompt: str,
     ds_model: str = "deepseek-v4-flash",
@@ -776,21 +730,6 @@ def _dayana_complete(
     max_tokens: int = 800,
     fallback_text: str = None,
 ):
-    """
-    Единый диспетчер запросов Даяны.
-
-    Путь 1 (основной): DeepSeek.
-        - ds_model: "deepseek-v4-flash" (дёшево) или "deepseek-v4-pro" (умнее).
-        - thinking=True включает встроенное рассуждение модели. В этом режиме
-          мы берём ТОЛЬКО .content (финальный ответ), а .reasoning_content
-          (размышления вслух) игнорируем — в чат он не попадает.
-        - В thinking-режиме temperature не действует (так устроен DeepSeek),
-          поэтому передаём её только в non-thinking.
-    Путь 2 (резерв): Groq со старым перебором моделей и costылями.
-    Путь 3 (последний): если всё легло — fallback_text (для поздравлений),
-        иначе пробрасываем ошибку.
-    """
-    # ── Путь 1: DeepSeek ──
     if client_deepseek is not None:
         try:
             kwargs = {
@@ -805,16 +744,12 @@ def _dayana_complete(
                 kwargs["temperature"] = temperature
             completion = client_deepseek.chat.completions.create(**kwargs)
             answer = completion.choices[0].message.content
-            # В thinking-режиме модель может потратить весь лимит на
-            # рассуждение и вернуть пустой content. Не отдаём пустоту в чат —
-            # проваливаемся в Groq-резерв (Путь 2), он пустым не ответит.
             if answer and answer.strip():
                 return answer
             print("DeepSeek вернул пустой ответ (thinking съел лимит?), откатываюсь на Groq...")
         except Exception as e:
             print(f"DeepSeek (Даяна) недоступен ({e}), откатываюсь на Groq...")
 
-    # ── Путь 2: Groq-резерв ──
     if groq_models is None:
         groq_models = ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]
     for model in groq_models:
@@ -831,13 +766,10 @@ def _dayana_complete(
                 continue
             raise
 
-    # ── Путь 3: совсем всё легло ──
     if fallback_text is not None:
         return fallback_text
     raise Exception("Все модели недоступны")
 
-# Пул сносок-дисклеймеров для "Даяна ответь" — в её стиле, лаконично.
-# Подставляется случайно, чтобы не примелькалось.
 DAYANA_DISCLAIMERS = [
     "Я ИИ, иногда несу чушь. Проверяй.",
     "ИИ. Могу и ошибиться — не на меня потом пеняй.",
@@ -856,7 +788,6 @@ def ask_dayana(question: str) -> str:
 
 ВОПРОС: {question}
 """
-    # Flash + thinking: Даяна думает перед ответом → меньше глупых ответов.
     answer = _dayana_complete(
         prompt,
         ds_model="deepseek-v4-flash",
@@ -864,9 +795,6 @@ def ask_dayana(question: str) -> str:
         temperature=0.8,
         max_tokens=15000,
     )
-    # Дисклеймер приклеивается ВСЕГДА (и для DeepSeek, и для Groq-резерва).
-    # Курсив накладывается в обработчике — там, где идёт HTML-экранирование,
-    # чтобы тег не попал под escape вместе с текстом ответа.
     disclaimer = random.choice(DAYANA_DISCLAIMERS)
     return f"{answer}[[DISCLAIMER]]{disclaimer}"
 
@@ -895,7 +823,6 @@ def dayana_judge(context: str, hint: str = None) -> str:
 
 Вынеси вердикт.
 """
-    # Pro + thinking: судья споров — взвесить стороны, логичный вердикт.
     return _dayana_complete(
         prompt,
         ds_model="deepseek-v4-pro",
@@ -928,7 +855,6 @@ def dayana_guilty(context: str, hint: str = None) -> str:
 
 Назначь виноватого.
 """
-    # Pro + thinking: разобрать кто реально виноват, а не назначить наугад.
     return _dayana_complete(
         prompt,
         ds_model="deepseek-v4-pro",
@@ -936,6 +862,39 @@ def dayana_guilty(context: str, hint: str = None) -> str:
         groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
         temperature=0.7,
         max_tokens=15000,
+    )
+
+# 11.1 ДАЯНА — ПОСОВЕТУЙ
+def dayana_advise(topic: str, user_name: str) -> str:
+    prompt = f"""
+Ты — Даяна. Секретарша со стальными нервами, острым языком и безупречным кругозором.
+Участник по имени {user_name} просит у тебя совет или рекомендацию.
+
+ЗАПРОС ПОЛЬЗОВАТЕЛЯ:
+"{topic}"
+
+ПРАВИЛА И СТРУКТУРА:
+1. ФИЛЬТР БЕЗОПАСНОСТИ (СТРОГО):
+   - Если запрос касается медицины, здоровья, лекарств, политики, выборов, органов власти, религии или вероисповедания:
+     НЕ ДАВАЙ рекомендацию. Саркастично и дерзко откажи в своем стиле (ты секретарь, а не врач/политрук/священник, пусть идут к профильным специалистам). 1-2 предложения максимум.
+
+2. РАСПОЗНАВАНИЕ КАТЕГОРИИ:
+   - Определи, что просят: фильм/сериал/мультфильм/аниме ("кино", "кинчик", "фильмец"), книгу/мангу ("чтиво"), музыку/трек, блюдо/еду ("пожрать", "хавчик"), игру или общий жизненный/бытовой совет.
+
+3. ФОРМАТ СОВЕТА:
+   - Если категория понятна: назови 1 конкретный вариант (название книги/фильма/блюда/игры) и аргументируй, почему именно это стоит внимания.
+   - Если запрос общий или абстрактный: дай нестандартный, практичный или ироничный совет.
+   - Тон: уверенный, с характером, без заискивания и шаблонов вроде "Конечно!", "Отличный выбор!".
+   - Объем: 3–5 предложений. На русском языке.
+"""
+    return _dayana_complete(
+        prompt=prompt,
+        ds_model="deepseek-v4-flash",
+        thinking=True,
+        groq_models=["llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        temperature=0.8,
+        max_tokens=800,
+        fallback_text="Мой главный совет на сегодня: начни думать своей головой, а не перекладывать выбор на бота.",
     )
 
 # 11.5 ДАЯНА — АКТИВНОСТЬ (УТРО, ВЕЧЕР, РЕАНИМАТОР)
@@ -981,12 +940,8 @@ def dayana_generate_bait(context: str) -> str:
 """
     return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Чат уснул? Пора просыпаться, расскажите хоть что-нибудь интересное.")
 
-# ═══════════════════════════════════════════════
 # ДАЯНА — ПОЗДРАВЛЕНИЯ С ДР
-# ═══════════════════════════════════════════════
-
 def dayana_birthday_morning(name: str, age: int) -> str:
-    """Полное поздравление в полночь по МСК"""
     age_block = f"Ему/ей сегодня исполняется {age} лет." if age else ""
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами и острым языком.
@@ -1000,7 +955,6 @@ def dayana_birthday_morning(name: str, age: int) -> str:
 - Пиши от первого лица, на русском языке
 - Никаких "конечно!", "замечательно!", шаблонных фраз
 """
-    # Flash non-thinking: творческое поздравление, рассуждение не нужно.
     return _dayana_complete(
         prompt,
         ds_model="deepseek-v4-flash",
@@ -1012,7 +966,6 @@ def dayana_birthday_morning(name: str, age: int) -> str:
     )
 
 def dayana_birthday_midday(name: str, age: int) -> str:
-    """Короткое напоминание в полдень по МСК"""
     age_block = f"({age} лет — серьёзная дата)" if age else ""
     prompt = f"""
 Ты — Даяна. Острый язык, короткие фразы.
@@ -1020,7 +973,6 @@ def dayana_birthday_midday(name: str, age: int) -> str:
 Напомни об этом — коротко, с лёгким упрёком в адрес забывчивых.
 Упомяни имя именинника. 2-3 предложения максимум. На русском.
 """
-    # Flash non-thinking: короткое напоминание, рассуждение не нужно.
     return _dayana_complete(
         prompt,
         ds_model="deepseek-v4-flash",
@@ -1031,27 +983,21 @@ def dayana_birthday_midday(name: str, age: int) -> str:
         fallback_text=f"Эй, кто ещё не поздравил {name}? Стыдно.",
     )
 
-# ═══════════════════════════════════════════════
 # УТИЛИТЫ ДР — ФОРМАТИРОВАНИЕ СПИСКА
-# ═══════════════════════════════════════════════
-
 def format_birthday_list(rows: list) -> str:
-    """Форматирует список ДР, сортируя по ближайшим от сегодня"""
     if not rows:
         return "🎂 <b>Дни рождения чата</b>\n\nПока никто не добавил свою дату. Начни первым!"
 
-    now = datetime.now(timezone.utc) + timedelta(hours=3)  # МСК
+    now = datetime.now(timezone.utc) + timedelta(hours=3)
     today_month = now.month
     today_day = now.day
     today_year = now.year
 
     def sort_key(row):
         _, day, month, _ = row
-        # Сколько дней осталось до следующего ДР
         try:
             next_bd = datetime(today_year, month, day)
         except ValueError:
-            # 29 февраля в невисокосный год
             next_bd = datetime(today_year, month, 28)
         if (next_bd.month, next_bd.day) < (today_month, today_day):
             next_bd = next_bd.replace(year=today_year + 1)
@@ -1065,7 +1011,6 @@ def format_birthday_list(rows: list) -> str:
         if (month, day) > (today_month, today_day):
             age -= 1
         month_name = MONTHS_RU.get(month, str(month))
-        # Если ДР сегодня — выделяем
         if month == today_month and day == today_day:
             text += f"🎉 <b>{user_name}</b> — {day} {month_name} ({age} лет) — <b>СЕГОДНЯ!</b>\n"
         else:
@@ -1113,10 +1058,7 @@ def verify_game_token(token: str) -> dict | None:
     except Exception:
         return None
 
-# ═══════════════════════════════════════════════
 # 14. ИГРА "Я НИКОГДА НЕ"
-# ═══════════════════════════════════════════════
-
 NEVER_CATEGORIES = [
     ("🔞 Интимное", "секс, отношения, измены, пикантные ситуации между людьми"),
     ("✈️ Путешествия", "страны, приключения в поездках, экзотика, странные ситуации за границей"),
@@ -1174,22 +1116,16 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
             raise
     return "Я никогда не делал что-то о чём потом жалел"
 
-
 def build_never_join_text(game: dict) -> str:
     players = list(game["players"].values())
     count = len(players)
-    if count == 0:
-        players_str = "<i>пока никого нет...</i>"
-    else:
-        players_str = ", ".join(f"<b>{p}</b>" for p in players)
-
+    players_str = "<i>пока никого нет...</i>" if count == 0 else ", ".join(f"<b>{p}</b>" for p in players)
     return (
         f"🎮 <b>Игра «Я никогда не»</b>\n\n"
         f"Нажми кнопку чтобы войти в игру!\n"
         f"Игра стартует через {NEVER_JOIN_TIMEOUT} сек после первого игрока.\n\n"
         f"👥 Игроки ({count}): {players_str}"
     )
-
 
 def build_never_vote_text(game: dict) -> str:
     phrase = game["current_phrase"]
@@ -1216,7 +1152,6 @@ def build_never_vote_text(game: dict) -> str:
         f"🙅 Не делал ({len(never_names)}): {never_str}"
         f"{pending_str}"
     )
-
 
 def build_never_results_text(game: dict) -> str:
     scores = game["scores"]
@@ -1254,14 +1189,12 @@ def build_never_results_text(game: dict) -> str:
 
     return text
 
-
 def build_never_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
     count = len(game["players"])
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text=f"🙋 Я играю! ({count})", callback_data="never_join")],
         [types.InlineKeyboardButton(text="▶️ Начать сейчас", callback_data="never_start")],
     ])
-
 
 def build_never_keyboard_vote(game: dict) -> types.InlineKeyboardMarkup:
     did_count = sum(1 for v in game["votes"].values() if v == "did")
@@ -1273,7 +1206,6 @@ def build_never_keyboard_vote(game: dict) -> types.InlineKeyboardMarkup:
         ],
         [types.InlineKeyboardButton(text="➕ Я тоже играю!", callback_data="never_join")],
     ])
-
 
 async def never_auto_start(chat_id: int, message_id: int):
     await asyncio.sleep(NEVER_JOIN_TIMEOUT)
@@ -1293,7 +1225,6 @@ async def never_auto_start(chat_id: int, message_id: int):
         return
     await never_start_game(chat_id, message_id)
 
-
 async def never_start_game(chat_id: int, message_id: int):
     game = never_games.get(chat_id)
     if not game:
@@ -1308,7 +1239,6 @@ async def never_start_game(chat_id: int, message_id: int):
     game["join_message_id"] = message_id
 
     await never_next_round(chat_id)
-
 
 async def never_next_round(chat_id: int):
     game = never_games.get(chat_id)
@@ -1365,14 +1295,12 @@ async def never_next_round(chat_id: int):
     task = asyncio.create_task(never_vote_timer(chat_id, game["round"]))
     game["vote_task"] = task
 
-
 async def never_vote_timer(chat_id: int, round_n: int):
     await asyncio.sleep(NEVER_VOTE_TIMEOUT)
     game = never_games.get(chat_id)
     if not game or game.get("phase") != "voting" or game.get("round") != round_n:
         return
     await never_next_round(chat_id)
-
 
 async def never_finish(chat_id: int):
     game = never_games.get(chat_id)
@@ -1398,7 +1326,6 @@ async def never_finish(chat_id: int):
             pass
 
     never_games.pop(chat_id, None)
-
 
 @dp.callback_query(lambda c: c.data in ("never_join", "never_start", "never_did", "never_never"))
 async def never_callback(callback: types.CallbackQuery):
@@ -1479,8 +1406,6 @@ async def never_callback(callback: types.CallbackQuery):
 
         if vote == "did":
             game["scores"][user_id] = game["scores"].get(user_id, 0) + 1
-            if prev_vote == "never":
-                pass
         elif vote == "never" and prev_vote == "did":
             game["scores"][user_id] = max(0, game["scores"].get(user_id, 0) - 1)
 
@@ -1506,11 +1431,7 @@ async def never_callback(callback: types.CallbackQuery):
 
     await callback.answer()
 
-
-# ═══════════════════════════════════════════════
 # 15. ИГРА "УГАДАЙ АВТОРА"
-# ═══════════════════════════════════════════════
-
 QUOTE_JOIN_TIMEOUT = 45
 QUOTE_VOTE_TIMEOUT = 30
 QUOTE_ROUNDS = 6
@@ -1548,7 +1469,6 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
     finally:
         release_conn(conn)
 
-
 def build_quote_join_text(game: dict) -> str:
     players = list(game["players"].values())
     count = len(players)
@@ -1559,7 +1479,6 @@ def build_quote_join_text(game: dict) -> str:
         f"Старт через {QUOTE_JOIN_TIMEOUT} сек после первого игрока.\n\n"
         f"👥 Игроки ({count}): {players_str}"
     )
-
 
 def build_quote_vote_text(game: dict) -> str:
     quote = game["current_quote"]
@@ -1584,7 +1503,6 @@ def build_quote_vote_text(game: dict) -> str:
         f"✅ Проголосовали ({voted_count}/{total_players}): {voted_str}"
         f"{pending_str}"
     )
-
 
 def build_quote_reveal_text(game: dict) -> str:
     quote = game["current_quote"]
@@ -1619,7 +1537,6 @@ def build_quote_reveal_text(game: dict) -> str:
         f"🎯 Угадали: {correct_str}\n"
         f"💀 Промазали: {wrong_str}"
     )
-
 
 def build_quote_results_text(game: dict) -> str:
     players = game["players"]
@@ -1656,14 +1573,12 @@ def build_quote_results_text(game: dict) -> str:
 
     return text
 
-
 def build_quote_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
     count = len(game["players"])
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text=f"🙋 Я играю! ({count})", callback_data="quote_join")],
         [types.InlineKeyboardButton(text="▶️ Начать сейчас", callback_data="quote_start")],
     ])
-
 
 def build_quote_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboardMarkup:
     players = game["players"]
@@ -1684,7 +1599,6 @@ def build_quote_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboard
     buttons.append([types.InlineKeyboardButton(text="➕ Я тоже играю!", callback_data="quote_join")])
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
 async def quote_auto_start(chat_id: int, message_id: int):
     await asyncio.sleep(QUOTE_JOIN_TIMEOUT)
     game = quote_games.get(chat_id)
@@ -1702,7 +1616,6 @@ async def quote_auto_start(chat_id: int, message_id: int):
         return
     await quote_start_game(chat_id, message_id)
 
-
 async def quote_start_game(chat_id: int, message_id: int):
     game = quote_games.get(chat_id)
     if not game:
@@ -1713,7 +1626,6 @@ async def quote_start_game(chat_id: int, message_id: int):
     game["round"] = 0
     game["scores"] = {uid: 0 for uid in game["players"]}
     await quote_next_round(chat_id)
-
 
 async def quote_next_round(chat_id: int):
     game = quote_games.get(chat_id)
@@ -1770,14 +1682,12 @@ async def quote_next_round(chat_id: int):
     task = asyncio.create_task(quote_vote_timer(chat_id, game["round"]))
     game["vote_task"] = task
 
-
 async def quote_vote_timer(chat_id: int, round_n: int):
     await asyncio.sleep(QUOTE_VOTE_TIMEOUT)
     game = quote_games.get(chat_id)
     if not game or game.get("phase") != "voting" or game.get("round") != round_n:
         return
     await quote_reveal(chat_id)
-
 
 async def quote_reveal(chat_id: int):
     game = quote_games.get(chat_id)
@@ -1810,7 +1720,6 @@ async def quote_reveal(chat_id: int):
     await asyncio.sleep(4)
     await quote_next_round(chat_id)
 
-
 async def quote_finish(chat_id: int):
     game = quote_games.get(chat_id)
     if not game:
@@ -1829,7 +1738,6 @@ async def quote_finish(chat_id: int):
         except Exception:
             pass
     quote_games.pop(chat_id, None)
-
 
 @dp.callback_query(lambda c: c.data.startswith("quote_"))
 async def quote_callback(callback: types.CallbackQuery):
@@ -1925,7 +1833,6 @@ async def quote_callback(callback: types.CallbackQuery):
 
     await callback.answer()
 
-
 # 16. ВЕБ — CORS
 @web.middleware
 async def cors_middleware(request, handler):
@@ -1938,7 +1845,7 @@ async def cors_middleware(request, handler):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
-# 16. ВЕБ — ЭНДПОИНТЫ
+# ВЕБ — ЭНДПОИНТЫ
 async def handle_result(request):
     try:
         data = await request.json()
@@ -2004,28 +1911,17 @@ async def handle_casino_balance(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-# ═══════════════════════════════════════════════
 # 17. ФОНОВАЯ ЗАДАЧА — ПОЗДРАВЛЕНИЯ С ДР
-# ═══════════════════════════════════════════════
-
 async def birthday_checker():
-    """
-    Проверяет дни рождения каждую минуту.
-    Поздравляет в 21:00 UTC (= 00:00 МСК) и 09:00 UTC (= 12:00 МСК).
-    Хранит в памяти кого уже поздравили сегодня — дублей не будет.
-    """
-    sent_keys: set = set()  # (chat_id, user_id, "morning"/"midday", "YYYY-MM-DD")
+    sent_keys: set = set()
 
     while True:
         await asyncio.sleep(60)
         try:
             now = datetime.now(timezone.utc)
             today_str = now.strftime('%Y-%m-%d')
-
-            # Чистим вчерашние записи
             sent_keys = {k for k in sent_keys if k[3] == today_str}
 
-            # Определяем период
             period = None
             if now.hour == BIRTHDAY_MORNING_UTC and now.minute < 5:
                 period = "morning"
@@ -2070,80 +1966,61 @@ async def birthday_checker():
             print(f"Ошибка в birthday_checker: {e}")
 
 async def dayana_activity_manager():
-    """Управляет утренними, вечерними и реанимационными вбросами Даяны."""
     current_date = None
     morning_min, evening_min = 0, 0
     morning_done, evening_done, bait_done = False, False, False
 
     while True:
-        await asyncio.sleep(60)  # Проверяем каждую минуту
+        await asyncio.sleep(60)
         try:
             now = datetime.now(timezone.utc)
             now_msk = now + timedelta(hours=3)
             today_str = now_msk.strftime('%Y-%m-%d')
 
-            # Новый день — сбрасываем флаги и генерируем случайные минуты
             if current_date != today_str:
                 current_date = today_str
                 morning_min = random.randint(0, 59)
                 evening_min = random.randint(0, 59)
                 morning_done, evening_done, bait_done = False, False, False
 
-            # 1. ДОБРОЕ УТРО (9: - 10:00)
+            # 1. ДОБРОЕ УТРО (09:00 - 10:00)
             if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
-                # СНАЧАЛА стучимся в БД. Если она спит, код прервется здесь и попробует через минуту.
-                # В чат ничего не отправится, пока БД не проснется и не даст реальное имя.
                 user = get_random_active_user(ALLOWED_CHAT_ID)
-                
-                # Если мы дошли сюда, значит БД работает. Сразу ставим галочку, чтобы избежать дублей.
                 morning_done = True
                 
-                # Первое сообщение: Общее приветствие
                 text_general = dayana_generate_morning_general()
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
                 
-                # Делаем паузу 4 секунды (эффект набора текста)
                 await asyncio.sleep(4)
                 
-                # Второе сообщение: Персональный панч
                 text_personal = dayana_generate_morning_personal(user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                # Отправляем без заголовка, как логичное продолжение
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
-                
                 continue
 
             # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
             if now_msk.hour == 21 and now_msk.minute >= evening_min and not evening_done:
-                # СНАЧАЛА стучимся в БД.
                 user = get_random_active_user(ALLOWED_CHAT_ID)
-                
-                # БД ответила - ставим галочку.
                 evening_done = True
                 
-                # Первое сообщение: Общий вопрос
                 text_general = dayana_generate_evening_general()
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
                 
-                # Делаем паузу 4 секунды (эффект набора текста)
                 await asyncio.sleep(4)
                 
-                # Второе сообщение: Персональный вопрос
                 text_personal = dayana_generate_evening_personal(user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                # Отправляем без заголовка, как логичное продолжение
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
-                
                 continue
 
-            # 3. РЕАНИМАТОР ЧАТА (Строго с 10:00 до 21:00)
+            # 3. РЕАНИМАТОР ЧАТА (10:00 - 21:00)
             if 10 <= now_msk.hour < 21 and not bait_done:
                 last_msg_time = get_last_message_time(ALLOWED_CHAT_ID)
                 if last_msg_time:
                     diff = now - last_msg_time
-                    if diff.total_seconds() > 5 * 3600:  # 5 часов тишины
+                    if diff.total_seconds() > 5 * 3600:
                         rows = get_last_messages(ALLOWED_CHAT_ID, limit=10)
                         context = format_context(rows) if rows else "Тишина..."
                         text = dayana_generate_bait(context)
@@ -2154,10 +2031,7 @@ async def dayana_activity_manager():
         except Exception as e:
             print(f"Ошибка в dayana_activity_manager: {e}")
 
-# ═══════════════════════════════════════════════
 # 18. КОМАНДЫ БОТА
-# ═══════════════════════════════════════════════
-
 @dp.message(Command("id"))
 async def cmd_id(message: types.Message):
     await message.answer(f"ID этого чата: <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -2181,15 +2055,13 @@ async def cmd_help(message: types.Message):
         "    /quotestop — остановить «Угадай автора»\n\n"
         "🎂 /birthday — дни рождения чата\n\n"
         "💬 <b>Даяна, ответь [вопрос]</b> — спросить Даяну\n"
+        "💡 <b>Даяна, посоветуй [категория/тема]</b> — получить совет от Даяны\n"
         "⚖️ <b>Даяна рассуди</b> — рассудить спор\n"
         "👉 <b>Даяна кто виноват</b> — назначить виноватого"
     )
     await message.answer(help_text, parse_mode="HTML")
 
-# ═══════════════════════════════════════════════
 # 19. КОМАНДА /birthday И ЕЁ ОБРАБОТЧИКИ
-# ═══════════════════════════════════════════════
-
 def build_birthday_menu_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🎂 Указать мой ДР", callback_data="bday_set")],
@@ -2218,10 +2090,8 @@ async def birthday_callback(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    # ── Указать ДР ──
     if action == "bday_set":
         await callback.answer()
-        # Проверяем — есть ли уже ДР у пользователя
         existing = get_user_birthday(chat_id, user_id)
         if existing:
             day, month, year = existing
@@ -2239,11 +2109,9 @@ async def birthday_callback(callback: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=types.ForceReply(selective=True, input_field_placeholder="15.03.1995")
         )
-        # Запоминаем что ждём ответ от этого пользователя
         birthday_waiting[(chat_id, user_id)] = msg.message_id
         return
 
-    # ── Список всех ДР ──
     if action == "bday_list":
         await callback.answer()
         rows = get_all_birthdays(chat_id)
@@ -2259,12 +2127,10 @@ async def birthday_callback(callback: types.CallbackQuery):
                                    reply_markup=build_birthday_menu_keyboard())
         return
 
-    # ── Удалить ДР ──
     if action == "bday_delete":
         deleted = delete_birthday(chat_id, user_id)
         if deleted:
             await callback.answer("✅ Твой день рождения удалён.", show_alert=True)
-            # Обновляем список
             rows = get_all_birthdays(chat_id)
             text = format_birthday_list(rows)
             try:
@@ -2281,10 +2147,7 @@ async def birthday_callback(callback: types.CallbackQuery):
 
     await callback.answer()
 
-# ═══════════════════════════════════════════════
 # 20. КОМАНДЫ ИГР
-# ═══════════════════════════════════════════════
-
 @dp.message(Command("never"))
 async def cmd_never(message: types.Message):
     if not is_chat_allowed(message.chat.id):
@@ -2529,16 +2392,12 @@ async def cmd_summary(message: types.Message):
         print(f"Ошибка AI: {e}")
         await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
 
-# ═══════════════════════════════════════════════
 # 21. СБОР СООБЩЕНИЙ (главный хэндлер)
-# ═══════════════════════════════════════════════
-
 @dp.message()
 async def collect_messages(message: types.Message):
     if not is_chat_allowed(message.chat.id):
         return
 
-    # Определяем автора
     if message.sender_chat:
         author = message.sender_chat.title or message.sender_chat.username or "Канал"
         user_id = None
@@ -2551,11 +2410,10 @@ async def collect_messages(message: types.Message):
         return
 
     # ── Проверяем: ответ на ForceReply для ввода ДР ──
-    if (message.reply_to_message and user_id and message.text):
+    if message.reply_to_message and user_id and message.text:
         waiting_key = (message.chat.id, user_id)
         expected_msg_id = birthday_waiting.get(waiting_key)
         if expected_msg_id and message.reply_to_message.message_id == expected_msg_id:
-            # Это ответ на наш запрос даты ДР
             del birthday_waiting[waiting_key]
             raw = message.text.strip()
             try:
@@ -2571,7 +2429,7 @@ async def collect_messages(message: types.Message):
                 age = now_year - dt.year
                 month_name = MONTHS_RU.get(dt.month, str(dt.month))
                 await message.reply(
-                    f"✅ Запомнил! День рождения <b>{author}</b> \u2014 {dt.day} {month_name} {dt.year} г. ({age} лет)\n"
+                    f"✅ Запомнил! День рождения <b>{author}</b> — {dt.day} {month_name} {dt.year} г. ({age} лет)\n"
                     f"Поздравлю тебя в этот день 🎂",
                     parse_mode="HTML"
                 )
@@ -2584,12 +2442,26 @@ async def collect_messages(message: types.Message):
                 )
             return
 
+    # ── Проверяем: ответ на ForceReply для ввода темы совета ──
+    if message.reply_to_message and user_id and message.text:
+        waiting_key = (message.chat.id, user_id)
+        expected_advice_msg_id = advice_waiting.get(waiting_key)
+        if expected_advice_msg_id and message.reply_to_message.message_id == expected_advice_msg_id:
+            del advice_waiting[waiting_key]
+            user_topic = message.text.strip()
+            try:
+                raw_advice = dayana_advise(user_topic, author)
+                safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await message.reply(f"<b>💡 Даяна:</b>\n\n{safe_advice}", parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка Даяны (совет по реплаю): {e}")
+                await message.reply("Что-то пошло не так, совет отменяется.")
+            return
+
     # ── Обработка текстовых сообщений с упоминанием Даяны ──
     if message.text:
         text_lower = message.text.lower()
 
-        # Должен идти ПЕРВЫМ среди команд Даяны, иначе "создал" может
-        # зацепиться обработчиком "ответь" и уйти в ИИ.
         if "даяна" in text_lower and ("создал" in text_lower or "создала" in text_lower or "кто тебя сделал" in text_lower):
             await message.reply(
                 "<b>Даяна: </b>\n\n"
@@ -2660,6 +2532,34 @@ async def collect_messages(message: types.Message):
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
 
+        if "даяна" in text_lower and "посоветуй" in text_lower:
+            try:
+                idx = text_lower.index("посоветуй") + len("посоветуй")
+                user_topic = message.text[idx:].strip(" !?,.:;")
+                if not user_topic:
+                    msg = await bot.send_message(
+                        message.chat.id,
+                        f"<b>{author}</b>, что именно тебе посоветовать?\n\n"
+                        f"🎬 <b>Фильм, сериал, мультфильм</b>\n"
+                        f"📚 <b>Книгу</b>\n"
+                        f"🍕 <b>Блюдо</b>\n"
+                        f"🎵 <b>Музыку</b>\n"
+                        f"🎮 <b>Игру</b>\n\n"
+                        f"👆 <b>Нажми «Ответить»</b> на это сообщение и напиши категорию или конкретное пожелание.",
+                        parse_mode="HTML",
+                        reply_markup=types.ForceReply(selective=True, input_field_placeholder="фильм на вечер / что поесть")
+                    )
+                    advice_waiting[(message.chat.id, user_id)] = msg.message_id
+                    return
+
+                raw_advice = dayana_advise(user_topic, author)
+                safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                await message.reply(f"<b>💡 Даяна:</b>\n\n{safe_advice}", parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка Даяны (посоветуй): {e}")
+                await message.reply("Не могу ничего посоветовать прямо сейчас.")
+            return
+
     # ── Сохраняем в историю ──
     if message.text:
         save_message(message.chat.id, author, message.text)
@@ -2677,11 +2577,9 @@ async def main():
     cleanup_old_messages()
     print("Бот запущен и готов к работе!")
 
-    # Запускаем фоновую задачу проверки ДР
     asyncio.create_task(birthday_checker())
     print("Планировщик дней рождений запущен")
 
-    # Запускаем фоновую задачу активности Даяны
     asyncio.create_task(dayana_activity_manager())
     print("Менеджер активности Даяны запущен")
 
