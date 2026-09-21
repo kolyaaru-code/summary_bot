@@ -676,15 +676,18 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             prompt = _build_summary_prompt(full_text, timeframe_text, message_count)
             print(f"[LOG] DeepSeek: Длина отправляемого текста = {len(prompt)} символов.")
             
-            completion = client_deepseek.chat.completions.create(
-                model="deepseek-v4-flash", 
+            ccompletion = client_deepseek.chat.completions.create(
+                model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
-                max_tokens=2000,
+                max_tokens=4000,
+                extra_body={"thinking": {"type": "disabled"}},
+                timeout=180,
             )
             
-            answer = completion.choices[0].message.content
-            print(f"[LOG] DeepSeek: Ответ получен. Длина = {len(answer) if answer else 0} символов.")
+            choice = completion.choices[0]
+            answer = choice.message.content
+            print(f"[LOG] DeepSeek: finish_reason={choice.finish_reason}, длина={len(answer) if answer else 0}")
             
             if answer and answer.strip():
                 return answer
@@ -705,7 +708,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85, 
-                max_tokens=4000, 
+                max_tokens=1500, 
             )
             answer = completion.choices[0].message.content
             print(f"[LOG] Groq ({model}): Ответ получен. Длина = {len(answer) if answer else 0} символов.")
