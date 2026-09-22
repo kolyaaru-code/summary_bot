@@ -23,7 +23,6 @@ GROQ_KEY = os.getenv("GROQ_KEY")
 ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
-RAILWAY_URL = os.getenv("RAILWAY_URL", "")
 GAME_URL = "https://kolyaaru-code.github.io/summary_bot/"
 CASINO_URL = "https://kolyaaru-code.github.io/summary_bot/casino.html"
 TOKEN_TTL = 300
@@ -33,6 +32,7 @@ MAX_VOICE_SIZE_MB = 5
 MAX_MESSAGE_LENGTH = 4000
 MAX_TEXT_LENGTH = 4000
 MAX_PROMPT_CHARS = 9000
+SUMMARY_COOLDOWN = 60      # секунд между /summary в одном чате
 
 # Настройки игры "Я никогда не"
 NEVER_JOIN_TIMEOUT = 45    # секунд на сбор игроков после первого нажатия
@@ -74,6 +74,9 @@ birthday_waiting: dict = {}
 
 # Ожидание ввода темы для совета: (chat_id, user_id) -> message_id бота с ForceReply
 advice_waiting: dict = {}
+
+# Время последнего /summary: chat_id -> timestamp
+summary_cooldown: dict = {}
 
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
@@ -136,19 +139,25 @@ def init_db():
                               month INTEGER NOT NULL,
                               year INTEGER NOT NULL,
                               UNIQUE(chat_id, user_id))''')
+            cursor.execute('ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_chat_ts ON history (chat_id, timestamp DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dayana_q_chat_ts ON dayana_questions (chat_id, timestamp DESC)')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS bot_flags
+                             (flag_key TEXT PRIMARY KEY,
+                              created_at TIMESTAMPTZ DEFAULT NOW())''')
         conn.commit()
         print("БД инициализирована")
     finally:
         release_conn(conn)
 
-def save_message(chat_id, user_name, text):
+def save_message(chat_id, user_name, text, user_id=None):
     text = text[:MAX_TEXT_LENGTH]
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                'INSERT INTO history (chat_id, user_name, message_text) VALUES (%s, %s, %s)',
-                (chat_id, user_name, text)
+                'INSERT INTO history (chat_id, user_name, message_text, user_id) VALUES (%s, %s, %s, %s)',
+                (chat_id, user_name, text, user_id)
             )
         conn.commit()
     except Exception as e:
@@ -220,6 +229,7 @@ def cleanup_old_messages():
         with conn.cursor() as cursor:
             cursor.execute("DELETE FROM dayana_questions WHERE timestamp < NOW() - INTERVAL '30 days'")
             deleted_dayana = cursor.rowcount
+            cursor.execute("DELETE FROM bot_flags WHERE created_at < NOW() - INTERVAL '7 days'")
         conn.commit()
         print(f"Очистка БД: история сохраняется навсегда, dayana_questions удалено={deleted_dayana}")
     except Exception as e:
@@ -287,6 +297,25 @@ def get_peepee_scores(chat_id: int) -> list:
                 ORDER BY wins DESC, losses ASC
             ''', (chat_id,))
             return cursor.fetchall()
+    finally:
+        release_conn(conn)
+
+def try_claim_flag(key: str) -> bool:
+    """True — флаг поставлен сейчас впервые, можно действовать. False — уже был."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO bot_flags (flag_key) VALUES (%s) ON CONFLICT (flag_key) DO NOTHING',
+                (key,)
+            )
+            claimed = cursor.rowcount == 1
+        conn.commit()
+        return claimed
+    except Exception as e:
+        print(f"Ошибка флага {key}: {e}")
+        conn.rollback()
+        return False
     finally:
         release_conn(conn)
 
@@ -588,7 +617,7 @@ async def transcribe_audio(file_id: str, filename: str, file_size: int) -> str |
         await bot.download(file_id, destination=buffer)
         buffer.seek(0)
         buffer.name = filename
-        transcription = client.audio.transcriptions.create(model="whisper-large-v3-turbo", file=buffer)
+        transcription = await asyncio.to_thread(client.audio.transcriptions.create, model="whisper-large-v3-turbo", file=buffer)
         return transcription.text
     except Exception as e:
         print(f"Ошибка транскрибации: {e}")
@@ -644,7 +673,7 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 - Сообщений: {message_count}
 - {volume_instruction}
 
-ЖЁСТКИЙ ЛИМИТ: весь ответ — не больше 1700 символов (примерно 220-280 слов), независимо от того, сколько было сообщений. Это дайджест, а не протокол. Не пытайся упомянуть каждого и каждое сообщение — если материала много, отбирай жёстче, а не пиши длиннее.
+ЖЁСТКИЙ ЛИМИТ: весь ответ — не больше 3500 символов (примерно 450-600 слов), независимо от того, сколько было сообщений. Это дайджест, а не протокол. Не пытайся упомянуть каждого и каждое сообщение — если материала много, отбирай жёстче, а не пиши длиннее.
 
 КАК ГОВОРИШЬ:
 - Матом — естественно, как в разговоре с друзьями.
@@ -662,7 +691,7 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 
 ЗАПРЕЩЕНО: мягкие формулировки, одинаковая структура, вата, хвалить без подъёба.
 
-Голосовые [🎤] и кружочки [📹] — полноценные сообщения.
+Голосовые [🎤], кружочки [📹] и подписи к медиа [🖼] — полноценные сообщения.
 
 ВОТ ЧТО БЫЛО В ЧАТЕ:
 {messages_text}
@@ -682,7 +711,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
-                max_tokens=2800,
+                max_tokens=6000,
                 extra_body={"thinking": {"type": "disabled"}},
                 timeout=180,
             )
@@ -710,7 +739,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.85,
-                "max_tokens": 3500,
+                "max_tokens": 7000,
             }
             if model.startswith("openai/gpt-oss"):
                 groq_kwargs["reasoning_effort"] = "low"
@@ -1007,7 +1036,7 @@ def format_birthday_list(rows: list) -> str:
     if not rows:
         return "🎂 <b>Дни рождения чата</b>\n\nПока никто не добавил свою дату. Начни первым!"
 
-    now = datetime.now(timezone.utc) + timedelta(hours=3)
+    now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_OFFSET)
     today_month = now.month
     today_day = now.day
     today_year = now.year
@@ -1278,7 +1307,7 @@ async def never_next_round(chat_id: int):
 
     try:
         category = game["categories"][game["round"] - 1] if game.get("categories") else None
-        phrase = generate_never_phrase(players_list, chat_context, game["used_phrases"], category)
+        phrase = await asyncio.to_thread(generate_never_phrase, players_list, chat_context, game["used_phrases"], category)
         game["used_phrases"].append(phrase)
     except Exception as e:
         print(f"Ошибка генерации фразы: {e}")
@@ -1873,7 +1902,8 @@ async def handle_result(request):
         update_peepee_score(ALLOWED_CHAT_ID, int(payload["user_id"]), payload["user_name"], bool(won))
         return web.json_response({"ok": True})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+        print(f"Ошибка API (handle_result): {e}")
+        return web.json_response({"error": "Internal error"}, status=500)
 
 async def handle_scores(request):
     try:
@@ -1881,7 +1911,8 @@ async def handle_scores(request):
         scores = [{"name": r[0], "wins": r[1], "losses": r[2]} for r in rows]
         return web.json_response({"scores": scores})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+        print(f"Ошибка API (handle_scores): {e}")
+        return web.json_response({"error": "Internal error"}, status=500)
 
 async def handle_casino_spin(request):
     try:
@@ -1905,7 +1936,7 @@ async def handle_casino_spin(request):
         })
     except Exception as e:
         print(f"Ошибка casino_spin: {e}")
-        return web.json_response({"error": str(e)}, status=500)
+        return web.json_response({"error": "Internal error"}, status=500)
 
 async def handle_casino_leaderboard(request):
     try:
@@ -1913,7 +1944,8 @@ async def handle_casino_leaderboard(request):
         board = [{"name": r[0], "balance": r[1]} for r in rows]
         return web.json_response({"board": board})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+        print(f"Ошибка API (handle_casino_leaderboard): {e}")
+        return web.json_response({"error": "Internal error"}, status=500)
 
 async def handle_casino_balance(request):
     try:
@@ -1924,7 +1956,8 @@ async def handle_casino_balance(request):
         balance = get_or_create_casino_balance(ALLOWED_CHAT_ID, int(payload["user_id"]), payload["user_name"])
         return web.json_response({"balance": balance, "user_name": payload["user_name"]})
     except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+        print(f"Ошибка API (handle_casino_balance): {e}")
+        return web.json_response({"error": "Internal error"}, status=500)
 
 # 17. ФОНОВАЯ ЗАДАЧА — ПОЗДРАВЛЕНИЯ С ДР
 async def birthday_checker():
@@ -1946,7 +1979,7 @@ async def birthday_checker():
             if not period:
                 continue
 
-            now_msk = now + timedelta(hours=3)
+            now_msk = now + timedelta(hours=TIMEZONE_OFFSET)
             birthdays = get_todays_birthdays(ALLOWED_CHAT_ID, now_msk.day, now_msk.month)
             if not birthdays:
                 continue
@@ -1957,14 +1990,16 @@ async def birthday_checker():
                     continue
 
                 sent_keys.add(key)
+                if not try_claim_flag(f"bday:{user_id}:{period}:{today_str}"):
+                    continue
                 age = now.year - year
 
                 try:
                     if period == "morning":
-                        text = dayana_birthday_morning(user_name, age)
+                        text = await asyncio.to_thread(dayana_birthday_morning, user_name, age)
                         header = f"🎂 <b>С днём рождения, {user_name}!</b>\n\n"
                     else:
-                        text = dayana_birthday_midday(user_name, age)
+                        text = await asyncio.to_thread(dayana_birthday_midday, user_name, age)
                         header = f"🎈 <b>Напоминание!</b>\n\n"
 
                     safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1989,7 +2024,7 @@ async def dayana_activity_manager():
         await asyncio.sleep(60)
         try:
             now = datetime.now(timezone.utc)
-            now_msk = now + timedelta(hours=3)
+            now_msk = now + timedelta(hours=TIMEZONE_OFFSET)
             today_str = now_msk.strftime('%Y-%m-%d')
 
             if current_date != today_str:
@@ -2000,32 +2035,36 @@ async def dayana_activity_manager():
 
             # 1. ДОБРОЕ УТРО (09:00 - 10:00)
             if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
-                user = get_random_active_user(ALLOWED_CHAT_ID)
                 morning_done = True
-                
-                text_general = dayana_generate_morning_general()
+                if not try_claim_flag(f"morning:{today_str}"):
+                    continue
+                user = get_random_active_user(ALLOWED_CHAT_ID)
+
+                text_general = await asyncio.to_thread(dayana_generate_morning_general)
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
                 
                 await asyncio.sleep(4)
                 
-                text_personal = dayana_generate_morning_personal(user)
+                text_personal = await asyncio.to_thread(dayana_generate_morning_personal, user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
                 continue
 
             # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
             if now_msk.hour == 21 and now_msk.minute >= evening_min and not evening_done:
-                user = get_random_active_user(ALLOWED_CHAT_ID)
                 evening_done = True
-                
-                text_general = dayana_generate_evening_general()
+                if not try_claim_flag(f"evening:{today_str}"):
+                    continue
+                user = get_random_active_user(ALLOWED_CHAT_ID)
+
+                text_general = await asyncio.to_thread(dayana_generate_evening_general)
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
                 
                 await asyncio.sleep(4)
                 
-                text_personal = dayana_generate_evening_personal(user)
+                text_personal = await asyncio.to_thread(dayana_generate_evening_personal, user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
                 continue
@@ -2036,9 +2075,12 @@ async def dayana_activity_manager():
                 if last_msg_time:
                     diff = now - last_msg_time
                     if diff.total_seconds() > 5 * 3600:
+                        bait_done = True
+                        if not try_claim_flag(f"bait:{today_str}"):
+                            continue
                         rows = get_last_messages(ALLOWED_CHAT_ID, limit=10)
                         context = format_context(rows) if rows else "Тишина..."
-                        text = dayana_generate_bait(context)
+                        text = await asyncio.to_thread(dayana_generate_bait, context)
                         safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                         await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
                         bait_done = True
@@ -2375,6 +2417,13 @@ async def cmd_summary(message: types.Message):
         else:
             await message.answer("⚠️ Используй число. Например: /summary 3")
             return
+    now_ts = time.time()
+    last_ts = summary_cooldown.get(message.chat.id, 0)
+    if now_ts - last_ts < SUMMARY_COOLDOWN:
+        wait = int(SUMMARY_COOLDOWN - (now_ts - last_ts))
+        await message.answer(f"⏳ Батя ещё не отдышался. Подожди {wait} сек.")
+        return
+    summary_cooldown[message.chat.id] = now_ts
     status_msg = await message.answer(f"⏳ Читаю ваш бред за последние {hours} ч...")
     conn = get_conn()
     try:
@@ -2394,12 +2443,12 @@ async def cmd_summary(message: types.Message):
         await status_msg.edit_text("За это время сообщений нет. Либо вы спите, либо я сломался.")
         return
     try:
-        raw_summary = get_ai_summary(all_rows, f"{hours} ч.", len(all_rows))
+        raw_summary = await asyncio.to_thread(get_ai_summary, all_rows, f"{hours} ч.", len(all_rows))
         safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         full_text = f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}"
         dayana_questions = get_dayana_questions(message.chat.id, hours)
         if dayana_questions:
-            dayana_comments = get_dayana_block(dayana_questions)
+            dayana_comments = await asyncio.to_thread(get_dayana_block, dayana_questions)
             safe_dayana = dayana_comments.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             full_text += f"\n\n<b>🔮 КАК ВЫ МУЧАЛИ МОЮ ПОДРУГУ ДАЯНУ:</b>\n\n{safe_dayana}"
         await send_long_message(status_msg, full_text)
@@ -2465,13 +2514,26 @@ async def collect_messages(message: types.Message):
             del advice_waiting[waiting_key]
             user_topic = message.text.strip()
             try:
-                raw_advice = dayana_advise(user_topic, author)
+                raw_advice = await asyncio.to_thread(dayana_advise, user_topic, author)
                 safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>💡 Даяна:</b>\n\n{safe_advice}", parse_mode="HTML")
             except Exception as e:
                 print(f"Ошибка Даяны (совет по реплаю): {e}")
                 await message.reply("Что-то пошло не так, совет отменяется.")
             return
+
+    # ── Сохраняем в историю ──
+    if message.text:
+        save_message(message.chat.id, author, message.text, user_id=user_id)
+        print(f"[{author}]: {message.text}")
+    elif message.voice:
+        text = await transcribe_audio(message.voice.file_id, "voice.ogg", message.voice.file_size or 0)
+        save_message(message.chat.id, author, f"[🎤 Голосовое]: {text}" if text else "[🎤 Голосовое]: не удалось распознать", user_id=user_id)
+    elif message.video_note:
+        text = await transcribe_audio(message.video_note.file_id, "video_note.mp4", message.video_note.file_size or 0)
+        save_message(message.chat.id, author, f"[📹 Кружочек]: {text}" if text else "[📹 Кружочек]: не удалось распознать", user_id=user_id)
+    elif message.caption:
+        save_message(message.chat.id, author, f"[🖼 Медиа с подписью]: {message.caption}", user_id=user_id)
 
     # ── Обработка текстовых сообщений с упоминанием Даяны ──
     if message.text:
@@ -2495,7 +2557,7 @@ async def collect_messages(message: types.Message):
                     await message.reply("Ответь на что? Вопрос забыл.")
                     return
                 save_dayana_question(message.chat.id, author, question)
-                answer = ask_dayana(question)
+                answer = await asyncio.to_thread(ask_dayana, question)
                 if "[[DISCLAIMER]]" in answer:
                     main_part, disclaimer_part = answer.split("[[DISCLAIMER]]", 1)
                 else:
@@ -2520,7 +2582,7 @@ async def collect_messages(message: types.Message):
                 if not rows:
                     await message.reply("Не о чём рассуждать — чат пустой.")
                     return
-                verdict = dayana_judge(format_context(rows), hint)
+                verdict = await asyncio.to_thread(dayana_judge, format_context(rows), hint)
                 safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>⚖️ Даяна:</b>\n\n{safe_verdict}", parse_mode="HTML")
             except Exception as e:
@@ -2539,7 +2601,7 @@ async def collect_messages(message: types.Message):
                 if not rows:
                     await message.reply("Не в чем разбираться — чат пустой.")
                     return
-                guilty = dayana_guilty(format_context(rows), hint)
+                guilty = await asyncio.to_thread(dayana_guilty, format_context(rows), hint)
                 safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>👉 Даяна:</b>\n\n{safe_guilty}", parse_mode="HTML")
             except Exception as e:
@@ -2567,24 +2629,13 @@ async def collect_messages(message: types.Message):
                     advice_waiting[(message.chat.id, user_id)] = msg.message_id
                     return
 
-                raw_advice = dayana_advise(user_topic, author)
+                raw_advice = await asyncio.to_thread(dayana_advise, user_topic, author)
                 safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await message.reply(f"<b>💡 Даяна:</b>\n\n{safe_advice}", parse_mode="HTML")
             except Exception as e:
                 print(f"Ошибка Даяны (посоветуй): {e}")
                 await message.reply("Не могу ничего посоветовать прямо сейчас.")
             return
-
-    # ── Сохраняем в историю ──
-    if message.text:
-        save_message(message.chat.id, author, message.text)
-        print(f"[{author}]: {message.text}")
-    elif message.voice:
-        text = await transcribe_audio(message.voice.file_id, "voice.ogg", message.voice.file_size or 0)
-        save_message(message.chat.id, author, f"[🎤 Голосовое]: {text}" if text else "[🎤 Голосовое]: не удалось распознать")
-    elif message.video_note:
-        text = await transcribe_audio(message.video_note.file_id, "video_note.mp4", message.video_note.file_size or 0)
-        save_message(message.chat.id, author, f"[📹 Кружочек]: {text}" if text else "[📹 Кружочек]: не удалось распознать")
 
 async def main():
     init_db_pool()
