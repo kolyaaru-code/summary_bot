@@ -619,7 +619,7 @@ def get_dayana_block(questions: list) -> str:
             prompt=prompt,
             ds_model="deepseek-v4-flash",
             thinking=False,
-            groq_models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
+            groq_models=["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
             temperature=0.85,
             max_tokens=800,
         )
@@ -676,7 +676,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             prompt = _build_summary_prompt(full_text, timeframe_text, message_count)
             print(f"[LOG] DeepSeek: Длина отправляемого текста = {len(prompt)} символов.")
             
-            ccompletion = client_deepseek.chat.completions.create(
+            completion = client_deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
@@ -701,15 +701,20 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
     prompt = _build_summary_prompt(sampled_text, timeframe_text, message_count)
     print(f"[LOG] Groq: Длина урезанного текста = {len(prompt)} символов.")
     
-    for model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"]:
+    for model in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
         try:
             print(f"[LOG] Groq: Пробую модель {model}...")
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.85, 
-                max_tokens=1500, 
-            )
+            groq_kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.85,
+                "max_tokens": 4000,
+            }
+            if model.startswith("openai/gpt-oss"):
+                groq_kwargs["reasoning_effort"] = "low"
+            elif model.startswith("qwen/"):
+                groq_kwargs["reasoning_format"] = "hidden"
+            completion = client.chat.completions.create(**groq_kwargs)
             answer = completion.choices[0].message.content
             print(f"[LOG] Groq ({model}): Ответ получен. Длина = {len(answer) if answer else 0} символов.")
             
@@ -754,20 +759,29 @@ def _dayana_complete(
             print(f"DeepSeek (Даяна) недоступен ({e}), откатываюсь на Groq...")
 
     if groq_models is None:
-        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        groq_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
     for model in groq_models:
         try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature, max_tokens=max_tokens,
-            )
-            return completion.choices[0].message.content
+            groq_max = min(max_tokens, 4000)
+            groq_kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": groq_max,
+            }
+            if model.startswith("openai/gpt-oss"):
+                groq_kwargs["max_tokens"] = max(groq_max, 1024)
+                groq_kwargs["reasoning_effort"] = "low"
+            elif model.startswith("qwen/"):
+                groq_kwargs["reasoning_format"] = "hidden"
+            completion = client_dayana.chat.completions.create(**groq_kwargs)
+            answer = completion.choices[0].message.content
+            if answer and answer.strip():
+                return answer
+            print(f"Даяна: {model} вернула пустой ответ, пробую следующую...")
         except Exception as e:
-            if "rate_limit" in str(e).lower() or "model" in str(e).lower():
-                print(f"Даяна: {model} недоступна, переключаюсь...")
-                continue
-            raise
+            print(f"Даяна: {model} недоступна ({type(e).__name__}: {e}), переключаюсь...")
+            continue
 
     if fallback_text is not None:
         return fallback_text
@@ -830,7 +844,7 @@ def dayana_judge(context: str, hint: str = None) -> str:
         prompt,
         ds_model="deepseek-v4-pro",
         thinking=True,
-        groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
+        groq_models=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"],
         temperature=0.7,
         max_tokens=15000,
     )
@@ -862,7 +876,7 @@ def dayana_guilty(context: str, hint: str = None) -> str:
         prompt,
         ds_model="deepseek-v4-pro",
         thinking=True,
-        groq_models=["qwen/qwen3-32b", "llama-3.3-70b-versatile"],
+        groq_models=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"],
         temperature=0.7,
         max_tokens=15000,
     )
@@ -894,7 +908,7 @@ def dayana_advise(topic: str, user_name: str) -> str:
         prompt=prompt,
         ds_model="deepseek-v4-flash",
         thinking=True,
-        groq_models=["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+        groq_models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
         temperature=0.8,
         max_tokens=8192,
         fallback_text="Мой главный совет на сегодня: начни думать своей головой, а не перекладывать выбор на бота.",
@@ -962,7 +976,7 @@ def dayana_birthday_morning(name: str, age: int) -> str:
         prompt,
         ds_model="deepseek-v4-flash",
         thinking=False,
-        groq_models=["llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        groq_models=["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
         temperature=0.9,
         max_tokens=400,
         fallback_text=f"С днём рождения, {name}! Живи ярко — это единственное что имеет смысл.",
@@ -980,7 +994,7 @@ def dayana_birthday_midday(name: str, age: int) -> str:
         prompt,
         ds_model="deepseek-v4-flash",
         thinking=False,
-        groq_models=["llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        groq_models=["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
         temperature=0.9,
         max_tokens=200,
         fallback_text=f"Эй, кто ещё не поздравил {name}? Стыдно.",
@@ -1101,23 +1115,19 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
 {used_block}{context_block}
 Выдай ТОЛЬКО одну фразу начиная со слов "Я никогда не". Без кавычек, без пояснений.
 """
-    for model in ["llama-3.3-70b-versatile", "qwen/qwen3-32b"]:
-        try:
-            completion = client_dayana.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.95,
-                max_tokens=100,
-            )
-            phrase = completion.choices[0].message.content.strip().strip('"\'«»')
-            if not phrase.lower().startswith("я никогда не"):
-                phrase = "Я никогда не " + phrase
-            return phrase
-        except Exception as e:
-            if "rate_limit" in str(e).lower():
-                continue
-            raise
-    return "Я никогда не делал что-то о чём потом жалел"
+    phrase = _dayana_complete(
+        prompt,
+        ds_model="deepseek-v4-flash",
+        thinking=False,
+        groq_models=["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
+        temperature=0.95,
+        max_tokens=150,
+        fallback_text="Я никогда не делал что-то о чём потом жалел",
+    )
+    phrase = phrase.strip().strip('"\'«»')
+    if not phrase.lower().startswith("я никогда не"):
+        phrase = "Я никогда не " + phrase
+    return phrase
 
 def build_never_join_text(game: dict) -> str:
     players = list(game["players"].values())
