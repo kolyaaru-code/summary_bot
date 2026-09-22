@@ -16,7 +16,7 @@ from aiohttp import web
 import hmac
 import hashlib
 
-# 1. НАСТРОЙКИ
+# 1. НАСТРОЙК
 load_dotenv()
 TOKEN = os.getenv("TG_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
