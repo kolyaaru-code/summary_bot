@@ -644,7 +644,7 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 - Сообщений: {message_count}
 - {volume_instruction}
 
-ЖЁСТКИЙ ЛИМИТ: весь ответ — не больше 1200 символов (примерно 150-200 слов), независимо от того, сколько было сообщений. Это дайджест, а не протокол. Не пытайся упомянуть каждого и каждое сообщение — если материала много, отбирай жёстче, а не пиши длиннее.
+ЖЁСТКИЙ ЛИМИТ: весь ответ — не больше 1700 символов (примерно 220-280 слов), независимо от того, сколько было сообщений. Это дайджест, а не протокол. Не пытайся упомянуть каждого и каждое сообщение — если материала много, отбирай жёстче, а не пиши длиннее.
 
 КАК ГОВОРИШЬ:
 - Матом — естественно, как в разговоре с друзьями.
@@ -682,7 +682,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
-                max_tokens=2000,
+                max_tokens=2800,
                 extra_body={"thinking": {"type": "disabled"}},
                 timeout=180,
             )
@@ -710,7 +710,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.85,
-                "max_tokens": 2500,
+                "max_tokens": 3500,
             }
             if model.startswith("openai/gpt-oss"):
                 groq_kwargs["reasoning_effort"] = "low"
