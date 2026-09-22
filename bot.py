@@ -630,11 +630,11 @@ def get_dayana_block(questions: list) -> str:
 # 8. САММАРИ
 def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count: int) -> str:
     if message_count < 10:
-        volume_instruction = "Сообщений мало — будь краток."
+        volume_instruction = "Сообщений мало — 3-5 предложений, без разгона."
     elif message_count < 50:
-        volume_instruction = "Средняя активность — стандартный разбор."
+        volume_instruction = "Средняя активность — 6-10 предложений по существу."
     else:
-        volume_instruction = "Чат бурлил — можешь развернуться, но без воды."
+        volume_instruction = "Сообщений много — это НЕ повод растягивать ответ. Выбери 5-7 самых ярких моментов, остальное отбрось. Чем больше сообщений — тем жёстче отбор, а не длиннее текст."
     return f"""
 Ты — Батя этого чата. Не модератор, не ведущий, не журналист. Батя.
 Ты знаешь всех в лицо, помнишь кто что говорил месяц назад и не даёшь никому забыть об этом.
@@ -643,6 +643,8 @@ def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count
 - Период: {timeframe_text}
 - Сообщений: {message_count}
 - {volume_instruction}
+
+ЖЁСТКИЙ ЛИМИТ: весь ответ — не больше 1200 символов (примерно 150-200 слов), независимо от того, сколько было сообщений. Это дайджест, а не протокол. Не пытайся упомянуть каждого и каждое сообщение — если материала много, отбирай жёстче, а не пиши длиннее.
 
 КАК ГОВОРИШЬ:
 - Матом — естественно, как в разговоре с друзьями.
@@ -675,12 +677,12 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             full_text = format_full_log(rows)
             prompt = _build_summary_prompt(full_text, timeframe_text, message_count)
             print(f"[LOG] DeepSeek: Длина отправляемого текста = {len(prompt)} символов.")
-            
+
             completion = client_deepseek.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
-                max_tokens=4000,
+                max_tokens=2000,
                 extra_body={"thinking": {"type": "disabled"}},
                 timeout=180,
             )
@@ -708,7 +710,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.85,
-                "max_tokens": 4000,
+                "max_tokens": 2500,
             }
             if model.startswith("openai/gpt-oss"):
                 groq_kwargs["reasoning_effort"] = "low"
