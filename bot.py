@@ -301,7 +301,11 @@ def get_peepee_scores(chat_id: int) -> list:
         release_conn(conn)
 
 def try_claim_flag(key: str) -> bool:
-    """True — флаг поставлен сейчас впервые, можно действовать. False — уже был."""
+    """True — флаг поставлен сейчас впервые, можно действовать. False — уже был.
+
+    Если БД недоступна — бросает исключение: вызывающий не должен считать
+    сообщение отправленным, иначе секундный перезапуск БД съедает его на сутки.
+    """
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
@@ -312,10 +316,9 @@ def try_claim_flag(key: str) -> bool:
             claimed = cursor.rowcount == 1
         conn.commit()
         return claimed
-    except Exception as e:
-        print(f"Ошибка флага {key}: {e}")
+    except Exception:
         conn.rollback()
-        return False
+        raise
     finally:
         release_conn(conn)
 
@@ -1989,8 +1992,14 @@ async def birthday_checker():
                 if key in sent_keys:
                     continue
 
+                try:
+                    claimed = try_claim_flag(f"bday:{user_id}:{period}:{today_str}")
+                except Exception as e:
+                    print(f"ДР ({user_name}): БД недоступна ({e}), повторю через минуту")
+                    continue
+
                 sent_keys.add(key)
-                if not try_claim_flag(f"bday:{user_id}:{period}:{today_str}"):
+                if not claimed:
                     continue
                 age = now.year - year
 
@@ -2035,8 +2044,13 @@ async def dayana_activity_manager():
 
             # 1. ДОБРОЕ УТРО (09:00 - 10:00)
             if now_msk.hour == 9 and now_msk.minute >= morning_min and not morning_done:
+                try:
+                    claimed = try_claim_flag(f"morning:{today_str}")
+                except Exception as e:
+                    print(f"Даяна (утро): БД недоступна ({e}), повторю через минуту")
+                    continue
                 morning_done = True
-                if not try_claim_flag(f"morning:{today_str}"):
+                if not claimed:
                     continue
                 user = get_random_active_user(ALLOWED_CHAT_ID)
 
@@ -2053,8 +2067,13 @@ async def dayana_activity_manager():
 
             # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
             if now_msk.hour == 21 and now_msk.minute >= evening_min and not evening_done:
+                try:
+                    claimed = try_claim_flag(f"evening:{today_str}")
+                except Exception as e:
+                    print(f"Даяна (вечер): БД недоступна ({e}), повторю через минуту")
+                    continue
                 evening_done = True
-                if not try_claim_flag(f"evening:{today_str}"):
+                if not claimed:
                     continue
                 user = get_random_active_user(ALLOWED_CHAT_ID)
 
@@ -2075,15 +2094,19 @@ async def dayana_activity_manager():
                 if last_msg_time:
                     diff = now - last_msg_time
                     if diff.total_seconds() > 5 * 3600:
+                        try:
+                            claimed = try_claim_flag(f"bait:{today_str}")
+                        except Exception as e:
+                            print(f"Даяна (реаниматор): БД недоступна ({e}), повторю через минуту")
+                            continue
                         bait_done = True
-                        if not try_claim_flag(f"bait:{today_str}"):
+                        if not claimed:
                             continue
                         rows = get_last_messages(ALLOWED_CHAT_ID, limit=10)
                         context = format_context(rows) if rows else "Тишина..."
                         text = await asyncio.to_thread(dayana_generate_bait, context)
                         safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                         await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
-                        bait_done = True
 
         except Exception as e:
             print(f"Ошибка в dayana_activity_manager: {e}")
