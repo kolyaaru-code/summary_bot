@@ -15,6 +15,8 @@ from psycopg2 import pool
 from aiohttp import web
 import hmac
 import hashlib
+import html
+import re
 
 # 1. НАСТРОЙК
 load_dotenv()
@@ -40,7 +42,7 @@ NEVER_VOTE_TIMEOUT = 25    # секунд на голосование за ра�
 NEVER_ROUNDS = 6           # раундов в игре
 
 # Дни рождения — время отправки (UTC)
-BIRTHDAY_MORNING_UTC = 5  # = 02:00 МСК (UTC+3)
+BIRTHDAY_MORNING_UTC = 5  # = 08:00 МСК (UTC+3)
 BIRTHDAY_MIDDAY_UTC = 9   # = 12:00 МСК (UTC+3)
 
 # Русские названия месяцев в родительном падеже
@@ -1063,9 +1065,9 @@ def format_birthday_list(rows: list) -> str:
             age -= 1
         month_name = MONTHS_RU.get(month, str(month))
         if month == today_month and day == today_day:
-            text += f"🎉 <b>{user_name}</b> — {day} {month_name} ({age} лет) — <b>СЕГОДНЯ!</b>\n"
+            text += f"🎉 <b>{esc(user_name)}</b> — {day} {month_name} ({years_ru(age)}) — <b>СЕГОДНЯ!</b>\n"
         else:
-            text += f"🎈 <b>{user_name}</b> — {day} {month_name} ({age} лет)\n"
+            text += f"🎈 <b>{esc(user_name)}</b> — {day} {month_name} ({years_ru(age)})\n"
 
     return text
 
@@ -1073,18 +1075,50 @@ def format_birthday_list(rows: list) -> str:
 def is_chat_allowed(chat_id):
     return chat_id == ALLOWED_CHAT_ID
 
-async def send_long_message(target, text: str):
-    if len(text) <= MAX_MESSAGE_LENGTH:
-        await target.edit_text(text, parse_mode="HTML")
-        return
+def esc(value) -> str:
+    """Экранирует имя/цитату/ответ модели для вставки в HTML-сообщение Telegram."""
+    return html.escape(str(value), quote=False)
+
+def years_ru(n: int) -> str:
+    """21 год, 22 года, 25 лет."""
+    n = abs(int(n))
+    if 11 <= n % 100 <= 14:
+        word = "лет"
+    elif n % 10 == 1:
+        word = "год"
+    elif 2 <= n % 10 <= 4:
+        word = "года"
+    else:
+        word = "лет"
+    return f"{n} {word}"
+
+def split_for_telegram(text: str) -> list:
+    """Режет длинный текст на куски до MAX_MESSAGE_LENGTH, по возможности по переводу строки."""
     parts = []
     while len(text) > MAX_MESSAGE_LENGTH:
         split_at = text.rfind('\n', 0, MAX_MESSAGE_LENGTH)
-        if split_at == -1:
+        if split_at <= 0:
             split_at = MAX_MESSAGE_LENGTH
+            # не рвём HTML-сущность вида &amp; посередине
+            amp = text.rfind('&', split_at - 6, split_at)
+            if amp != -1 and ';' not in text[amp:split_at]:
+                split_at = amp
         parts.append(text[:split_at])
         text = text[split_at:].lstrip()
-    parts.append(text)
+    if text:
+        parts.append(text)
+    return parts
+
+async def reply_long(message, header: str, body: str, footer: str = ""):
+    """Ответ реплаем; если текст длиннее лимита Telegram — несколькими сообщениями.
+    body должен быть уже экранирован."""
+    parts = split_for_telegram(f"{header}{body}{footer}")
+    await message.reply(parts[0], parse_mode="HTML")
+    for part in parts[1:]:
+        await message.answer(part, parse_mode="HTML")
+
+async def send_long_message(target, text: str):
+    parts = split_for_telegram(text)
     await target.edit_text(parts[0], parse_mode="HTML")
     for part in parts[1:]:
         await target.answer(part, parse_mode="HTML")
@@ -1166,7 +1200,7 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
 def build_never_join_text(game: dict) -> str:
     players = list(game["players"].values())
     count = len(players)
-    players_str = "<i>пока никого нет...</i>" if count == 0 else ", ".join(f"<b>{p}</b>" for p in players)
+    players_str = "<i>пока никого нет...</i>" if count == 0 else ", ".join(f"<b>{esc(p)}</b>" for p in players)
     return (
         f"🎮 <b>Игра «Я никогда не»</b>\n\n"
         f"Нажми кнопку чтобы войти в игру!\n"
@@ -1181,20 +1215,20 @@ def build_never_vote_text(game: dict) -> str:
     categories = game.get("categories", [])
     cat_label = categories[round_n - 1][0] if categories and round_n <= len(categories) else ""
 
-    did_names = [game["players"][uid] for uid in game["votes"] if game["votes"][uid] == "did" and uid in game["players"]]
-    never_names = [game["players"][uid] for uid in game["votes"] if game["votes"][uid] == "never" and uid in game["players"]]
+    did_names = [esc(game["players"][uid]) for uid in game["votes"] if game["votes"][uid] == "did" and uid in game["players"]]
+    never_names = [esc(game["players"][uid]) for uid in game["votes"] if game["votes"][uid] == "never" and uid in game["players"]]
 
     did_str = ", ".join(f"<b>{n}</b>" for n in did_names) if did_names else "—"
     never_str = ", ".join(f"<b>{n}</b>" for n in never_names) if never_names else "—"
 
     voted = set(game["votes"].keys())
     all_players = set(game["players"].keys())
-    pending = [game["players"][uid] for uid in (all_players - voted)]
+    pending = [esc(game["players"][uid]) for uid in (all_players - voted)]
     pending_str = f"\n⏳ Ещё не ответили: {', '.join(pending)}" if pending else ""
 
     return (
         f"🔥 <b>Раунд {round_n}/{total}</b> {cat_label}\n\n"
-        f"<b>{phrase}</b>\n\n"
+        f"<b>{esc(phrase)}</b>\n\n"
         f"🙋 Делал ({len(did_names)}): {did_str}\n"
         f"🙅 Не делал ({len(never_names)}): {never_str}"
         f"{pending_str}"
@@ -1219,7 +1253,7 @@ def build_never_results_text(game: dict) -> str:
         pct = int((did_count / total_rounds) * 100)
         medal = medals[i] if i < 3 else "▪️"
         verdict = "прожжённый" if pct >= 70 else ("бывалый" if pct >= 40 else "скромняга")
-        text += f"{medal} <b>{name}</b> — делал {did_count}/{total_rounds} раз ({pct}%) — {verdict}\n"
+        text += f"{medal} <b>{esc(name)}</b> — делал {did_count}/{total_rounds} раз ({pct}%) — {verdict}\n"
 
     if sorted_players:
         winner_uid, winner_name = sorted_players[0]
@@ -1228,11 +1262,11 @@ def build_never_results_text(game: dict) -> str:
         loser_count = scores.get(loser_uid, 0)
 
         if winner_count > 0:
-            text += f"\n🏆 <b>{winner_name}</b> — самый опытный. Жил на полную."
+            text += f"\n🏆 <b>{esc(winner_name)}</b> — самый опытный. Жил на полную."
         if loser_count == 0:
-            text += f"\n😇 <b>{loser_name}</b> — либо святой, либо врёт."
+            text += f"\n😇 <b>{esc(loser_name)}</b> — либо святой, либо врёт."
         elif len(sorted_players) > 1 and loser_count < winner_count:
-            text += f"\n😂 <b>{loser_name}</b> — скромняга чата. Или просто стеснялся признаваться."
+            text += f"\n😂 <b>{esc(loser_name)}</b> — скромняга чата. Или просто стеснялся признаваться."
 
     return text
 
@@ -1277,8 +1311,9 @@ async def never_start_game(chat_id: int, message_id: int):
     if not game:
         return
 
-    if game.get("join_task") and not game["join_task"].done():
-        game["join_task"].cancel()
+    join_task = game.get("join_task")
+    if join_task and not join_task.done() and join_task is not asyncio.current_task():
+        join_task.cancel()
 
     game["phase"] = "playing"
     game["round"] = 0
@@ -1297,7 +1332,8 @@ async def never_next_round(chat_id: int):
         await never_finish(chat_id)
         return
 
-    game["phase"] = "voting"
+    # "loading" — пока генерируется фраза, голоса не принимаются
+    game["phase"] = "loading"
     game["votes"] = {}
 
     try:
@@ -1316,7 +1352,11 @@ async def never_next_round(chat_id: int):
         print(f"Ошибка генерации фразы: {e}")
         phrase = "Я никогда не делал что-то о чём потом жалел"
 
+    if never_games.get(chat_id) is not game:
+        return  # игру остановили, пока генерировалась фраза
+
     game["current_phrase"] = phrase
+    game["phase"] = "voting"
 
     text = build_never_vote_text(game)
     keyboard = build_never_keyboard_vote(game)
@@ -1419,6 +1459,9 @@ async def never_callback(callback: types.CallbackQuery):
             except Exception:
                 pass
             await callback.answer(f"Добро пожаловать, {user_name}! Голосуй! 🎮", show_alert=False)
+
+        else:
+            await callback.answer(f"Ты в игре, {user_name}! 🙋", show_alert=False)
         return
 
     if action == "never_start":
@@ -1472,8 +1515,10 @@ async def never_callback(callback: types.CallbackQuery):
         if all_voted and len(game["players"]) >= 2:
             if game.get("vote_task") and not game["vote_task"].done():
                 game["vote_task"].cancel()
+            game["phase"] = "pause"  # раунд закрыт: смена голоса больше не запускает следующий раунд
             await asyncio.sleep(2)
-            await never_next_round(chat_id)
+            if never_games.get(chat_id) is game:
+                await never_next_round(chat_id)
         return
 
     await callback.answer()
@@ -1490,16 +1535,20 @@ quote_games: dict = {}
 def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -> list:
     if not players:
         return []
+    player_ids = list(players.keys())
     player_names = list(players.values())
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
+            placeholders_ids = ",".join(["%s"] * len(player_ids))
             placeholders_names = ",".join(["%s"] * len(player_names))
             placeholders_used = ",".join(["%s"] * len(used_ids)) if used_ids else "NULL"
+            # Ищем по user_id; по имени — только старые строки, где user_id ещё не писался
             query = f"""
-                SELECT id, user_name, message_text FROM history
+                SELECT id, user_id, user_name, message_text FROM history
                 WHERE chat_id = %s
-                AND user_name IN ({placeholders_names})
+                AND (user_id IN ({placeholders_ids})
+                     OR (user_id IS NULL AND user_name IN ({placeholders_names})))
                 AND array_length(regexp_split_to_array(trim(message_text), '\\s+'), 1) >= 4
                 AND LENGTH(message_text) <= %s
                 AND message_text NOT LIKE '[%%'
@@ -1507,7 +1556,7 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
                 ORDER BY RANDOM()
                 LIMIT %s
             """
-            params = [chat_id] + player_names + [QUOTE_MAX_MSG_LENGTH]
+            params = [chat_id] + player_ids + player_names + [QUOTE_MAX_MSG_LENGTH]
             if used_ids:
                 params += used_ids
             params.append(count)
@@ -1519,7 +1568,7 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
 def build_quote_join_text(game: dict) -> str:
     players = list(game["players"].values())
     count = len(players)
-    players_str = ", ".join(f"<b>{p}</b>" for p in players) if players else "<i>пока никого нет...</i>"
+    players_str = ", ".join(f"<b>{esc(p)}</b>" for p in players) if players else "<i>пока никого нет...</i>"
     return (
         f"💬 <b>Игра «Угадай автора»</b>\n\n"
         f"Я буду показывать реальные цитаты из этого чата — угадывайте кто написал!\n"
@@ -1537,16 +1586,16 @@ def build_quote_vote_text(game: dict) -> str:
     voted_count = len(votes)
     total_players = len(players)
 
-    voted_names = [players[uid] for uid in votes if uid in players]
+    voted_names = [esc(players[uid]) for uid in votes if uid in players]
     voted_str = ", ".join(voted_names) if voted_names else "—"
 
-    pending = [players[uid] for uid in players if uid not in votes]
+    pending = [esc(players[uid]) for uid in players if uid not in votes]
     pending_str = f"\n⏳ Ещё не ответили: {', '.join(pending)}" if pending else ""
 
     return (
         f"💬 <b>Раунд {round_n}/{total}</b>\n\n"
         f"<b>Кто написал это сообщение?</b>\n\n"
-        f"<i>«{quote}»</i>\n\n"
+        f"<i>«{esc(quote)}»</i>\n\n"
         f"✅ Проголосовали ({voted_count}/{total_players}): {voted_str}"
         f"{pending_str}"
     )
@@ -1554,13 +1603,14 @@ def build_quote_vote_text(game: dict) -> str:
 def build_quote_reveal_text(game: dict) -> str:
     quote = game["current_quote"]
     author = game["current_author"]
+    author_id = game["current_author_id"]
     round_n = game["round"]
     total = game["max_rounds"]
-    votes = game["votes"]
+    votes = game["votes"]  # кто голосовал -> user_id того, на кого подумал
     players = game["players"]
 
-    correct = [players[uid] for uid, guess in votes.items() if guess == author and uid in players]
-    wrong = [players[uid] for uid, guess in votes.items() if guess != author and uid in players]
+    correct = [esc(players[uid]) for uid, guess in votes.items() if guess == author_id and uid in players]
+    wrong = [esc(players[uid]) for uid, guess in votes.items() if guess != author_id and uid in players]
 
     correct_str = ", ".join(f"<b>{n}</b>" for n in correct) if correct else "никто"
     wrong_str = ", ".join(f"<b>{n}</b>" for n in wrong) if wrong else "—"
@@ -1568,18 +1618,19 @@ def build_quote_reveal_text(game: dict) -> str:
     guess_groups = {}
     for uid, guess in votes.items():
         if uid in players:
-            guess_groups.setdefault(guess, []).append(players[uid])
+            guess_groups.setdefault(guess, []).append(esc(players[uid]))
     guesses_lines = []
-    for guess_name, voters in guess_groups.items():
-        marker = "✅" if guess_name == author else "❌"
+    for guess_id, voters in guess_groups.items():
+        marker = "✅" if guess_id == author_id else "❌"
+        guess_name = esc(players.get(guess_id, "?"))
         guesses_lines.append(f"  {marker} думали что <b>{guess_name}</b>: {', '.join(voters)}")
 
     guesses_str = "\n".join(guesses_lines) if guesses_lines else "никто не проголосовал"
 
     return (
         f"💬 <b>Раунд {round_n}/{total} — ответ!</b>\n\n"
-        f"<i>«{quote}»</i>\n\n"
-        f"✍️ Автор: <b>{author}</b>\n\n"
+        f"<i>«{esc(quote)}»</i>\n\n"
+        f"✍️ Автор: <b>{esc(author)}</b>\n\n"
         f"{guesses_str}\n\n"
         f"🎯 Угадали: {correct_str}\n"
         f"💀 Промазали: {wrong_str}"
@@ -1606,7 +1657,7 @@ def build_quote_results_text(game: dict) -> str:
             medal = "💀"
         pct = int((count / total_rounds) * 100)
         verdict = "Телепат 🧠" if pct >= 80 else ("Знает своих 👀" if pct >= 50 else "Не угадывает 🤷")
-        text += f"{medal} <b>{name}</b> — угадал {count}/{total_rounds} ({pct}%) — {verdict}\n"
+        text += f"{medal} <b>{esc(name)}</b> — угадал {count}/{total_rounds} ({pct}%) — {verdict}\n"
 
     if sorted_players:
         winner_uid, winner_name = sorted_players[0]
@@ -1614,9 +1665,9 @@ def build_quote_results_text(game: dict) -> str:
         loser_uid, loser_name = sorted_players[-1]
         loser_count = scores.get(loser_uid, 0)
         if winner_count > 0:
-            text += f"\n🏆 <b>{winner_name}</b> — знает всех насквозь. Телепат или стукач?"
+            text += f"\n🏆 <b>{esc(winner_name)}</b> — знает всех насквозь. Телепат или стукач?"
         if loser_count == 0:
-            text += f"\n💀 <b>{loser_name}</b> — либо не знает людей, либо специально валит."
+            text += f"\n💀 <b>{esc(loser_name)}</b> — либо не знает людей, либо специально валит."
 
     return text
 
@@ -1627,16 +1678,15 @@ def build_quote_keyboard_join(game: dict) -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="▶️ Начать сейчас", callback_data="quote_start")],
     ])
 
-def build_quote_keyboard_vote(game: dict, voter_id: int) -> types.InlineKeyboardMarkup:
+def build_quote_keyboard_vote(game: dict) -> types.InlineKeyboardMarkup:
+    # Клавиатура общая на всех, поэтому без отметки «мой выбор» — иначе её видит весь чат.
     players = game["players"]
-    current_guess = game["votes"].get(voter_id)
     buttons = []
     row = []
     for uid, name in players.items():
-        label = f"✅ {name}" if current_guess == name else name
         row.append(types.InlineKeyboardButton(
-            text=label,
-            callback_data=f"quote_vote_{name[:20]}"
+            text=name[:40],
+            callback_data=f"quote_vote_{uid}"
         ))
         if len(row) == 2:
             buttons.append(row)
@@ -1667,8 +1717,9 @@ async def quote_start_game(chat_id: int, message_id: int):
     game = quote_games.get(chat_id)
     if not game:
         return
-    if game.get("join_task") and not game["join_task"].done():
-        game["join_task"].cancel()
+    join_task = game.get("join_task")
+    if join_task and not join_task.done() and join_task is not asyncio.current_task():
+        join_task.cancel()
     game["phase"] = "playing"
     game["round"] = 0
     game["scores"] = {uid: 0 for uid in game["players"]}
@@ -1694,19 +1745,33 @@ async def quote_next_round(chat_id: int):
         quotes = get_random_quotes(chat_id, game["players"], 1, [])
 
     if not quotes:
-        await bot.send_message(chat_id, f"⚠️ Раунд {game['round']}: не удалось найти цитаты. Пишите больше в чат! Пропускаем...")
-        await asyncio.sleep(2)
-        await quote_next_round(chat_id)
+        played = game["round"] - 1
+        if played == 0:
+            quote_games.pop(chat_id, None)
+            no_quotes_text = (
+                "😕 В истории чата пока нет подходящих цитат от игроков.\n"
+                "Нужны обычные текстовые сообщения от 4 слов — попишите в чат и запускайте /quote позже."
+            )
+            try:
+                await bot.edit_message_text(no_quotes_text, chat_id=chat_id,
+                                            message_id=game["current_message_id"], reply_markup=None)
+            except Exception:
+                await bot.send_message(chat_id, no_quotes_text)
+            return
+        game["round"] = game["max_rounds"] = played
+        await quote_finish(chat_id)
         return
 
-    row = quotes[0]
-    msg_id, author, text = row
+    msg_id, author_id, author_name, text = quotes[0]
+    if author_id is None:  # старая строка без user_id — находим игрока по имени
+        author_id = next((uid for uid, n in game["players"].items() if n == author_name), None)
     game["used_ids"].append(msg_id)
     game["current_quote"] = text
-    game["current_author"] = author
+    game["current_author_id"] = author_id
+    game["current_author"] = game["players"].get(author_id, author_name)
 
     vote_text = build_quote_vote_text(game)
-    keyboard = build_quote_keyboard_vote(game, 0)
+    keyboard = build_quote_keyboard_vote(game)
 
     try:
         if game.get("current_message_id"):
@@ -1741,12 +1806,12 @@ async def quote_reveal(chat_id: int):
     if not game:
         return
 
-    author = game["current_author"]
+    game["phase"] = "reveal"  # голоса больше не принимаются
+    author_id = game["current_author_id"]
     votes = game["votes"]
-    players = game["players"]
 
     for uid, guess in votes.items():
-        if guess == author and uid in game["scores"]:
+        if guess == author_id and uid in game["scores"]:
             game["scores"][uid] += 1
 
     reveal_text = build_quote_reveal_text(game)
@@ -1765,7 +1830,8 @@ async def quote_reveal(chat_id: int):
             pass
 
     await asyncio.sleep(4)
-    await quote_next_round(chat_id)
+    if quote_games.get(chat_id) is game:
+        await quote_next_round(chat_id)
 
 async def quote_finish(chat_id: int):
     game = quote_games.get(chat_id)
@@ -1821,12 +1887,15 @@ async def quote_callback(callback: types.CallbackQuery):
             try:
                 await callback.message.edit_text(
                     build_quote_vote_text(game),
-                    reply_markup=build_quote_keyboard_vote(game, user_id),
+                    reply_markup=build_quote_keyboard_vote(game),
                     parse_mode="HTML"
                 )
             except Exception:
                 pass
             await callback.answer(f"Добро пожаловать, {user_name}! Угадывай! 🎮", show_alert=False)
+
+        else:
+            await callback.answer(f"Ты в игре, {user_name}! 🙋", show_alert=False)
         return
 
     if action == "quote_start":
@@ -1850,19 +1919,21 @@ async def quote_callback(callback: types.CallbackQuery):
             if "scores" in game:
                 game["scores"][user_id] = 0
 
-        guessed_name = action.replace("quote_vote_", "")
-
-        valid_names = list(game["players"].values())
-        if guessed_name not in valid_names:
+        try:
+            guessed_id = int(action.replace("quote_vote_", "", 1))
+        except ValueError:
+            guessed_id = None
+        if guessed_id not in game["players"]:
             await callback.answer("Такого игрока нет", show_alert=True)
             return
 
-        game["votes"][user_id] = guessed_name
+        guessed_name = game["players"][guessed_id]
+        game["votes"][user_id] = guessed_id
 
         try:
             await callback.message.edit_text(
                 build_quote_vote_text(game),
-                reply_markup=build_quote_keyboard_vote(game, user_id),
+                reply_markup=build_quote_keyboard_vote(game),
                 parse_mode="HTML"
             )
         except Exception:
@@ -1874,8 +1945,10 @@ async def quote_callback(callback: types.CallbackQuery):
         if all_voted and len(game["players"]) >= 2:
             if game.get("vote_task") and not game["vote_task"].done():
                 game["vote_task"].cancel()
+            game["phase"] = "reveal"  # раунд закрыт: повторный клик не запускает второе вскрытие
             await asyncio.sleep(1)
-            await quote_reveal(chat_id)
+            if quote_games.get(chat_id) is game:
+                await quote_reveal(chat_id)
         return
 
     await callback.answer()
@@ -2006,7 +2079,7 @@ async def birthday_checker():
                 try:
                     if period == "morning":
                         text = await asyncio.to_thread(dayana_birthday_morning, user_name, age)
-                        header = f"🎂 <b>С днём рождения, {user_name}!</b>\n\n"
+                        header = f"🎂 <b>С днём рождения, {esc(user_name)}!</b>\n\n"
                     else:
                         text = await asyncio.to_thread(dayana_birthday_midday, user_name, age)
                         header = f"🎈 <b>Напоминание!</b>\n\n"
@@ -2182,7 +2255,7 @@ async def birthday_callback(callback: types.CallbackQuery):
 
         msg = await bot.send_message(
             chat_id,
-            f"{hint}📅 <b>{user_name}</b>, введи дату своего дня рождения!\n\n"
+            f"{hint}📅 <b>{esc(user_name)}</b>, введи дату своего дня рождения!\n\n"
             f"👆 <b>Нажми «Ответить» на это сообщение</b> и напиши дату в формате:\n\n"
             f"<b>ДД.ММ.ГГГГ</b>\n\n"
             f"<i>Например: 20.05.1999</i>",
@@ -2303,6 +2376,7 @@ async def cmd_quote(message: types.Message):
         "scores": {},
         "current_quote": "",
         "current_author": "",
+        "current_author_id": None,
         "round": 0,
         "max_rounds": QUOTE_ROUNDS,
         "current_message_id": None,
@@ -2348,7 +2422,7 @@ async def cmd_game(message: types.Message):
         )
     ]])
     await message.answer(
-        f"🍆 <b>{user_name}</b>, найди писюн!\n<i>Ссылка действует 5 минут — только для тебя</i>",
+        f"🍆 <b>{esc(user_name)}</b>, найди писюн!\n<i>Ссылка действует 5 минут — только для тебя</i>",
         reply_markup=keyboard, parse_mode="HTML"
     )
 
@@ -2368,7 +2442,7 @@ async def cmd_casino(message: types.Message):
         )
     ]])
     await message.answer(
-        f"🎰 <b>{user_name}</b>, добро пожаловать в казино!\n"
+        f"🎰 <b>{esc(user_name)}</b>, добро пожаловать в казино!\n"
         f"<i>Стартовый баланс $1000. Удачи — она тебе понадобится.</i>\n"
         f"<i>Ссылка действует 5 минут — только для тебя</i>",
         reply_markup=keyboard, parse_mode="HTML"
@@ -2390,9 +2464,9 @@ async def cmd_peepee(message: types.Message):
         if i < 3: medal = medals[i]
         elif i == len(rows) - 1 and len(rows) > 3: medal = "💩"
         else: medal = "▪️"
-        text += f"{medal} {name} — {wins} нашёл / {losses} мимо ({pct}%)\n"
+        text += f"{medal} {esc(name)} — {wins} нашёл / {losses} мимо ({pct}%)\n"
     if len(rows) > 1:
-        text += f"\n🤡 Главный мимострел: <b>{rows[-1][0]}</b>"
+        text += f"\n🤡 Главный мимострел: <b>{esc(rows[-1][0])}</b>"
     await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("mypeepee"))
@@ -2419,7 +2493,7 @@ async def cmd_mypeepee(message: types.Message):
     elif pct >= 40: verdict = "Так себе, но бывает 🤷"
     else: verdict = "Позор семьи 💩"
     await message.answer(
-        f"🍆 <b>Статистика {name}:</b>\n\nНашёл: {wins}\nПромазал: {losses}\nТочность: {pct}%\n\nВердикт: {verdict}",
+        f"🍆 <b>Статистика {esc(name)}:</b>\n\nНашёл: {wins}\nПромазал: {losses}\nТочность: {pct}%\n\nВердикт: {verdict}",
         parse_mode="HTML"
     )
 
@@ -2458,11 +2532,14 @@ async def cmd_summary(message: types.Message):
             ''', (message.chat.id, hours))
             all_rows = cursor.fetchall()
     except Exception as e:
+        print(f"Ошибка чтения истории для саммари: {type(e).__name__}: {e}")
+        summary_cooldown.pop(message.chat.id, None)
         await status_msg.edit_text("Ошибка при чтении базы данных.")
         return
     finally:
         release_conn(conn)
     if not all_rows:
+        summary_cooldown.pop(message.chat.id, None)
         await status_msg.edit_text("За это время сообщений нет. Либо вы спите, либо я сломался.")
         return
     try:
@@ -2476,8 +2553,9 @@ async def cmd_summary(message: types.Message):
             full_text += f"\n\n<b>🔮 КАК ВЫ МУЧАЛИ МОЮ ПОДРУГУ ДАЯНУ:</b>\n\n{safe_dayana}"
         await send_long_message(status_msg, full_text)
     except Exception as e:
-        print(f"Ошибка AI: {e}")
-        await status_msg.edit_text("Все модели исчерпали лимит. Попробуй через час.")
+        print(f"Ошибка саммари: {type(e).__name__}: {e}")
+        summary_cooldown.pop(message.chat.id, None)
+        await status_msg.edit_text("Не получилось собрать саммари. Попробуй ещё раз чуть позже.")
 
 # 21. СБОР СООБЩЕНИЙ (главный хэндлер)
 @dp.message()
@@ -2513,10 +2591,11 @@ async def collect_messages(message: types.Message):
                     )
                     return
                 save_birthday(message.chat.id, user_id, author, dt.day, dt.month, dt.year)
-                age = now_year - dt.year
+                today = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_OFFSET)
+                age = today.year - dt.year - ((today.month, today.day) < (dt.month, dt.day))
                 month_name = MONTHS_RU.get(dt.month, str(dt.month))
                 await message.reply(
-                    f"✅ Запомнил! День рождения <b>{author}</b> — {dt.day} {month_name} {dt.year} г. ({age} лет)\n"
+                    f"✅ Запомнил! День рождения <b>{esc(author)}</b> — {dt.day} {month_name} {dt.year} г. ({years_ru(age)})\n"
                     f"Поздравлю тебя в этот день 🎂",
                     parse_mode="HTML"
                 )
@@ -2539,7 +2618,7 @@ async def collect_messages(message: types.Message):
             try:
                 raw_advice = await asyncio.to_thread(dayana_advise, user_topic, author)
                 safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await message.reply(f"<b>💡 Даяна:</b>\n\n{safe_advice}", parse_mode="HTML")
+                await reply_long(message, "<b>💡 Даяна:</b>\n\n", safe_advice)
             except Exception as e:
                 print(f"Ошибка Даяны (совет по реплаю): {e}")
                 await message.reply("Что-то пошло не так, совет отменяется.")
@@ -2562,7 +2641,9 @@ async def collect_messages(message: types.Message):
     if message.text:
         text_lower = message.text.lower()
 
-        if "даяна" in text_lower and ("создал" in text_lower or "создала" in text_lower or "кто тебя сделал" in text_lower):
+        # «кто тебя создал» не должен перехватывать обычные просьбы («Даяна, ответь, кто создал Телеграм»)
+        has_request = any(w in text_lower for w in ("ответь", "рассуди", "посоветуй"))
+        if "даяна" in text_lower and not has_request and ("создал" in text_lower or "создала" in text_lower or "кто тебя сделал" in text_lower):
             await message.reply(
                 "<b>Даяна: </b>\n\n"
                 "Меня создал Николай. Если нужно что-то подобное или есть идея — "
@@ -2588,7 +2669,7 @@ async def collect_messages(message: types.Message):
                 safe_answer = main_part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 if disclaimer_part:
                     safe_answer += f"\n\n<i>{disclaimer_part}</i>"
-                await message.reply(f"<b>Даяна:</b>\n\n{safe_answer}", parse_mode="HTML")
+                await reply_long(message, "<b>Даяна:</b>\n\n", safe_answer)
             except Exception as e:
                 print(f"Ошибка Даяны (ответь): {e}")
                 await message.reply("Не могу ответить прямо сейчас.")
@@ -2607,13 +2688,17 @@ async def collect_messages(message: types.Message):
                     return
                 verdict = await asyncio.to_thread(dayana_judge, format_context(rows), hint)
                 safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await message.reply(f"<b>⚖️ Даяна:</b>\n\n{safe_verdict}", parse_mode="HTML")
+                await reply_long(message, "<b>⚖️ Даяна:</b>\n\n", safe_verdict)
             except Exception as e:
                 print(f"Ошибка Даяны (рассуди): {e}")
                 await message.reply("Не могу рассудить прямо сейчас.")
             return
 
-        if "даяна" in text_lower and "виноват" in text_lower:
+        # «кто виноват(а/ы)» или отдельное слово «виноват»; «Даяна не виновата» — не триггер
+        asks_guilty = "виноват" in text_lower and bool(
+            re.search(r"\bкто\b", text_lower) or re.search(r"\bвиноват\b", text_lower)
+        )
+        if "даяна" in text_lower and asks_guilty:
             try:
                 idx = text_lower.index("виноват") + len("виноват")
                 hint = message.text[idx:].strip() or None
@@ -2626,7 +2711,7 @@ async def collect_messages(message: types.Message):
                     return
                 guilty = await asyncio.to_thread(dayana_guilty, format_context(rows), hint)
                 safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await message.reply(f"<b>👉 Даяна:</b>\n\n{safe_guilty}", parse_mode="HTML")
+                await reply_long(message, "<b>👉 Даяна:</b>\n\n", safe_guilty)
             except Exception as e:
                 print(f"Ошибка Даяны (виноват): {e}")
                 await message.reply("Не могу разобраться прямо сейчас.")
@@ -2639,7 +2724,7 @@ async def collect_messages(message: types.Message):
                 if not user_topic:
                     msg = await bot.send_message(
                         message.chat.id,
-                        f"<b>{author}</b>, что именно тебе посоветовать?\n\n"
+                        f"<b>{esc(author)}</b>, что именно тебе посоветовать?\n\n"
                         f"🎬 <b>Фильм, сериал, мультфильм</b>\n"
                         f"📚 <b>Книгу</b>\n"
                         f"🍕 <b>Блюдо</b>\n"
@@ -2654,7 +2739,7 @@ async def collect_messages(message: types.Message):
 
                 raw_advice = await asyncio.to_thread(dayana_advise, user_topic, author)
                 safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await message.reply(f"<b>💡 Даяна:</b>\n\n{safe_advice}", parse_mode="HTML")
+                await reply_long(message, "<b>💡 Даяна:</b>\n\n", safe_advice)
             except Exception as e:
                 print(f"Ошибка Даяны (посоветуй): {e}")
                 await message.reply("Не могу ничего посоветовать прямо сейчас.")
