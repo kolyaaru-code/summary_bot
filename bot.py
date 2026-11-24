@@ -53,6 +53,7 @@ MONTHS_RU = {
 }
 
 bot = Bot(token=TOKEN)
+BOT_ID = int(TOKEN.split(":")[0]) if TOKEN and ":" in TOKEN else None
 dp = Dispatcher()
 client = Groq(api_key=GROQ_KEY)
 client_dayana = Groq(api_key=os.getenv("GROQ_KEY_2"))
@@ -79,6 +80,10 @@ advice_waiting: dict = {}
 
 # Время последнего /summary: chat_id -> timestamp
 summary_cooldown: dict = {}
+
+# Очередь обращений к Даяне в чате
+dayana_lock = asyncio.Lock()
+BOT_USERNAME: str = ""
 
 # 2. ПУЛ СОЕДИНЕНИЙ С БД
 db_pool = None
@@ -142,7 +147,9 @@ def init_db():
                               year INTEGER NOT NULL,
                               UNIQUE(chat_id, user_id))''')
             cursor.execute('ALTER TABLE history ADD COLUMN IF NOT EXISTS user_id BIGINT')
+            cursor.execute('ALTER TABLE history ADD COLUMN IF NOT EXISTS is_bot BOOLEAN DEFAULT FALSE')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_chat_ts ON history (chat_id, timestamp DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_chat_not_bot ON history (chat_id, timestamp DESC) WHERE is_bot = FALSE')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_dayana_q_chat_ts ON dayana_questions (chat_id, timestamp DESC)')
             cursor.execute('''CREATE TABLE IF NOT EXISTS bot_flags
                              (flag_key TEXT PRIMARY KEY,
@@ -152,14 +159,14 @@ def init_db():
     finally:
         release_conn(conn)
 
-def save_message(chat_id, user_name, text, user_id=None):
+def save_message(chat_id, user_name, text, user_id=None, is_bot: bool = False):
     text = text[:MAX_TEXT_LENGTH]
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                'INSERT INTO history (chat_id, user_name, message_text, user_id) VALUES (%s, %s, %s, %s)',
-                (chat_id, user_name, text, user_id)
+                'INSERT INTO history (chat_id, user_name, message_text, user_id, is_bot) VALUES (%s, %s, %s, %s, %s)',
+                (chat_id, user_name, text, user_id, is_bot)
             )
         conn.commit()
     except Exception as e:
@@ -167,6 +174,10 @@ def save_message(chat_id, user_name, text, user_id=None):
         conn.rollback()
     finally:
         release_conn(conn)
+
+def save_dayana_message(chat_id: int, text: str):
+    if text and text.strip():
+        save_message(chat_id, "Даяна", text.strip(), user_id=BOT_ID, is_bot=True)
 
 def save_dayana_question(chat_id, user_name, question):
     question = question[:500]
@@ -246,7 +257,7 @@ def get_random_active_user(chat_id: int, days: int = 7) -> str:
         with conn.cursor() as cursor:
             cursor.execute('''
                 SELECT user_name FROM history
-                WHERE chat_id = %s AND timestamp >= NOW() - (%s * INTERVAL '1 day')
+                WHERE chat_id = %s AND (is_bot IS FALSE OR is_bot IS NULL) AND timestamp >= NOW() - (%s * INTERVAL '1 day')
                 GROUP BY user_name
                 ORDER BY RANDOM() LIMIT 1
             ''', (chat_id, days))
@@ -262,7 +273,7 @@ def get_last_message_time(chat_id: int):
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute('SELECT timestamp FROM history WHERE chat_id = %s ORDER BY timestamp DESC LIMIT 1', (chat_id,))
+            cursor.execute('SELECT timestamp FROM history WHERE chat_id = %s AND (is_bot IS FALSE OR is_bot IS NULL) ORDER BY timestamp DESC LIMIT 1', (chat_id,))
             row = cursor.fetchone()
             return row[0] if row else None
     finally:
@@ -663,44 +674,76 @@ def get_dayana_block(questions: list) -> str:
 
 # 8. САММАРИ
 def _build_summary_prompt(messages_text: str, timeframe_text: str, message_count: int) -> str:
-    if message_count < 10:
-        volume_instruction = "Сообщений мало — 3-5 предложений, без разгона."
-    elif message_count < 50:
-        volume_instruction = "Средняя активность — 6-10 предложений по существу."
+    if message_count < 15:
+        topics_count = "2-3 темы"
+    elif message_count < 60:
+        topics_count = "3-4 темы"
     else:
-        volume_instruction = "Сообщений много — это НЕ повод растягивать ответ. Выбери 5-7 самых ярких моментов, остальное отбрось. Чем больше сообщений — тем жёстче отбор, а не длиннее текст."
+        topics_count = "4-6 ключевых тем"
+
     return f"""
-Ты — Батя этого чата. Не модератор, не ведущий, не журналист. Батя.
-Ты знаешь всех в лицо, помнишь кто что говорил месяц назад и не даёшь никому забыть об этом.
+Ты — Батя этого чата. Не модератор, не секретарь, не ведущий. Батя.
+Ты знаешь всех участников, помнишь их косяки и не даёшь никому забыть о них.
 
 ВВОДНЫЕ:
 - Период: {timeframe_text}
-- Сообщений: {message_count}
-- {volume_instruction}
+- Всего сообщений: {message_count}
+- Выдели: {topics_count}
 
-ЖЁСТКИЙ ЛИМИТ: весь ответ — не больше 3500 символов (примерно 450-600 слов), независимо от того, сколько было сообщений. Это дайджест, а не протокол. Не пытайся упомянуть каждого и каждое сообщение — если материала много, отбирай жёстче, а не пиши длиннее.
+СТИЛЬ:
+- Разговорный язык, естественный мат к месту (как в живой дружеской компании).
+- Называй людей строго по именам. Без канцелярита и воды.
+- Если кто-то нёс чушь или сливался — говори прямо и едко.
+- В переписке участвует и твоя подруга Даяна — отмечай, как её доставали или как она кого-то осадила.
+- Голосовые [🎤], кружочки [📹] и подписи [🖼] считай обычными репликами.
 
-КАК ГОВОРИШЬ:
-- Матом — естественно, как в разговоре с друзьями.
-- Каждого называешь по имени.
-- Если кто-то нёс хуйню — говоришь прямо.
-- Короткие удары. Никакой воды.
-- Пишешь живо, резко, с характером.
+ФОРМАТ ВЫДАЧИ (СТРОГО):
+Ответ должен состоять ровно из ДВУХ частей, разделённых меткой:
+=== ПОДРОБНОСТИ ===
 
-ЧТО ДОЛЖНО БЫТЬ:
-- Атмосфера чата
-- Кто отличился и как
-- Что обсуждали и чем кончилось
-- Незакрытые споры
-- Вердикт одной фразой
+ЧАСТЬ 1 (Короткая выжимка — до 900 символов, без спойлеров):
+1. Одно-два предложения — общая атмосфера чата за этот период (главный нерв).
+2. Список ключевых тем ({topics_count}), каждая строка строго в формате:
+[Эмодзи] [Название темы] — [суть в 1 предложение и чем кончилось]
+3. 🏆 Отличился: [Имя] — [в чём конкретно отличился или за что отхватил]
+4. ⏳ Висит: [незакрытый спор, вопрос без ответа или договоренность (если всё решили — "всё перетёрли")]
+5. 💥 Вердикт Бати: [хлёсткий вывод одной фразой]
 
-ЗАПРЕЩЕНО: мягкие формулировки, одинаковая структура, вата, хвалить без подъёба.
+=== ПОДРОБНОСТИ ===
 
-Голосовые [🎤], кружочки [📹] и подписи к медиа [🖼] — полноценные сообщения.
+ЧАСТЬ 2 (Детальный разбор для раскрывающегося блока — до 2200 символов):
+По каждой из тем выше распиши подробности: кто что доказывал, смешные или дурацкие цитаты участников, как вмешивалась Даяна, аргументы сторон и чем всё завершилось. Без цензуры, живо, как пересказ друзьям в курилке.
 
-ВОТ ЧТО БЫЛО В ЧАТЕ:
+Пиши обычным текстом, без HTML-тегов (<, >, &).
+
+ВОТ ПЕРЕПИСКА ИЗ ЧАТА:
 {messages_text}
 """
+
+def format_summary_message(raw_summary: str, timeframe_text: str) -> str:
+    delimiter = "=== ПОДРОБНОСТИ ==="
+    if delimiter in raw_summary:
+        head, details = raw_summary.split(delimiter, 1)
+        head = head.strip()
+        details = details.strip()
+    else:
+        head = raw_summary.strip()
+        details = ""
+
+    safe_head = esc(head)
+    if details:
+        max_details_len = max(500, 3600 - len(safe_head))
+        if len(details) > max_details_len:
+            details = details[:max_details_len] + "...\n[подробности сокращены]"
+        safe_details = esc(details)
+        return (
+            f"🔥 <b>ПРОЖАРКА ЧАТА за {timeframe_text}</b>\n\n"
+            f"{safe_head}\n\n"
+            f"<blockquote expandable><b>Подробности (нажми, чтобы развернуть):</b>\n"
+            f"{safe_details}</blockquote>"
+        )
+    else:
+        return f"🔥 <b>ПРОЖАРКА ЧАТА за {timeframe_text}</b>\n\n{safe_head}"
 
 def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
     import traceback
@@ -716,8 +759,8 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
                 model="deepseek-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
-                max_tokens=6000,
-                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=8000,
+                extra_body={"thinking": {"type": "enabled"}},
                 timeout=180,
             )
             
@@ -869,18 +912,34 @@ def _deepseek_search_answer(prompt: str, max_tokens: int):
         print(f"DeepSeek с поиском недоступен ({e}), отвечаю без поиска...")
         return None
 
-def ask_dayana(question: str) -> tuple:
-    """Возвращает (ответ, источники, дисклеймер)."""
-    prompt = f"""
-Ты — Даяна. Секретарша со стальными нервами и острым языком.
-Чётко, по существу, без воды. Можешь срезать одной фразой.
-Никаких "конечно!", "отличный вопрос!". Говоришь как живой человек.
-Отвечаешь на русском языке.
-Если ответ зависит от свежих данных (новости, цены, даты, курсы, расписания) — сначала поищи в интернете.
-Пиши обычным текстом, без markdown (никаких **, #, таблиц). Ссылки в тексте не пиши — их добавят отдельно.
+def ask_dayana_seamless(message_text: str, author: str, chat_context: str = "", reply_context: str = "") -> tuple:
+    """Интеллектуальный ответ Даяны с учетом контекста чата, реплаев и веб-поиска.
+    Возвращает (answer, sources, disclaimer). Если ответ не требуется — answer == '[ПРОПУСК]'."""
+    reply_block = f"\n{reply_context}\n" if reply_context else ""
+    chat_block = f"\nКОНТЕКСТ ПОСЛЕДНИХ СООБЩЕНИЙ В ЧАТЕ:\n{chat_context}\n" if chat_context else ""
 
-ВОПРОС: {question}
+    prompt = f"""
+Ты — Даяна. Секретарша в закрытом дружеском Telegram-чате на 6 человек.
+У тебя стальные нервы, острый язык, природная ирония и идеальное знание компании.
+Ты — живой участник чата, а не робот-ассистент. Никаких слащавых шаблонов ("Конечно!", "Отличный вопрос!", "Чем могу помочь?"). Говоришь как реальный человек со своим характером.
+{chat_block}{reply_block}
+ТЕКУЩЕЕ СООБЩЕНИЕ:
+[{author}]: {message_text}
+
+ПРАВИЛА И ПОВЕДЕНИЕ (СТРОГО):
+1. ПРОВЕРКА ОБРАЩЕНИЯ:
+   - Если в сообщении просто упоминают твоё имя в третьем лице («Даяна вчера сказала...», «спросим у Даяны потом») и от тебя не ждут реакции:
+     ОТВЕТЬ СТРОГО ОДНИМ СЛОВОМ: [ПРОПУСК]
+   - Если к тебе обращаются напрямую, здороваются, спрашивают, просят совет, спорят, подкалывают или это ответ реплаем на твоё сообщение — ОБЯЗАТЕЛЬНО отвечай.
+
+2. СТИЛЬ И СОДЕРЖАНИЕ:
+   - Отвечай по существу, с лёгким стёбом или иронией, опираясь на контекст переписки.
+   - Если просят совет (фильм, сериал, еда, игра, музыка, бытовой выбор) — дай 1 конкретный вариант с уверенной аргументацией.
+   - Если вопрос требует актуальных данных (новости, курсы валют, погода, факты, расписания) — сначала поищи в интернете.
+   - Пиши обычным текстом, без markdown (никаких **, #, таблиц). Ссылки в сам текст не пиши — они добавятся автоматически.
+   - Объём: лаконично, 1-4 предложения. Не катай простыни, если не попросили подробностей. Отвечай на русском языке.
 """
+
     found = _deepseek_search_answer(prompt, max_tokens=15000)
     if found:
         answer, sources = found
@@ -893,7 +952,17 @@ def ask_dayana(question: str) -> tuple:
             max_tokens=15000,
         )
         sources = []
-    return answer, sources, random.choice(DAYANA_DISCLAIMERS)
+
+    answer = (answer or "").strip()
+    if answer == "[ПРОПУСК]" or answer.startswith("[ПРОПУСК]"):
+        return "[ПРОПУСК]", [], None
+
+    disclaimer = random.choice(DAYANA_DISCLAIMERS) if sources else None
+    return answer, sources, disclaimer
+
+def ask_dayana(question: str) -> tuple:
+    """Для обратной совместимости."""
+    return ask_dayana_seamless(question, "Участник")
 
 # 10. ДАЯНА — РАССУДИТЬ
 def dayana_judge(context: str, hint: str = None) -> str:
@@ -1170,11 +1239,11 @@ async def keep_typing(chat_id: int):
             pass
         await asyncio.sleep(4)
 
-async def send_long_message(target, text: str):
+async def send_long_message(target, text: str, parse_mode: str = "HTML"):
     parts = split_for_telegram(text)
-    await target.edit_text(parts[0], parse_mode="HTML")
+    await target.edit_text(parts[0], parse_mode=parse_mode)
     for part in parts[1:]:
-        await target.answer(part, parse_mode="HTML")
+        await target.answer(part, parse_mode=parse_mode)
 
 # 13. ТОКЕНЫ
 def generate_game_token(user_id: int, user_name: str) -> str:
@@ -1600,6 +1669,7 @@ def get_random_quotes(chat_id: int, players: dict, count: int, used_ids: list) -
             query = f"""
                 SELECT id, user_id, user_name, message_text FROM history
                 WHERE chat_id = %s
+                AND (is_bot IS FALSE OR is_bot IS NULL)
                 AND (user_id IN ({placeholders_ids})
                      OR (user_id IS NULL AND user_name IN ({placeholders_names})))
                 AND array_length(regexp_split_to_array(trim(message_text), '\\s+'), 1) >= 4
@@ -2143,6 +2213,7 @@ async def birthday_checker():
                         f"{header}{safe_text}",
                         parse_mode="HTML"
                     )
+                    save_dayana_message(ALLOWED_CHAT_ID, f"С днём рождения, {user_name}! {text}")
                     print(f"ДР поздравление отправлено: {user_name} ({period})")
                 except Exception as e:
                     print(f"Ошибка поздравления ДР ({user_name}, {period}): {e}")
@@ -2183,12 +2254,14 @@ async def dayana_activity_manager():
                 text_general = await asyncio.to_thread(dayana_generate_morning_general)
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
+                save_dayana_message(ALLOWED_CHAT_ID, text_general)
                 
                 await asyncio.sleep(4)
                 
                 text_personal = await asyncio.to_thread(dayana_generate_morning_personal, user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
+                save_dayana_message(ALLOWED_CHAT_ID, text_personal)
                 continue
 
             # 2. КАК ПРОШЕЛ ДЕНЬ (21:00 - 22:00)
@@ -2206,12 +2279,14 @@ async def dayana_activity_manager():
                 text_general = await asyncio.to_thread(dayana_generate_evening_general)
                 safe_general = text_general.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_general}", parse_mode="HTML")
+                save_dayana_message(ALLOWED_CHAT_ID, text_general)
                 
                 await asyncio.sleep(4)
                 
                 text_personal = await asyncio.to_thread(dayana_generate_evening_personal, user)
                 safe_personal = text_personal.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await bot.send_message(ALLOWED_CHAT_ID, safe_personal, parse_mode="HTML")
+                save_dayana_message(ALLOWED_CHAT_ID, text_personal)
                 continue
 
             # 3. РЕАНИМАТОР ЧАТА (10:00 - 21:00)
@@ -2233,6 +2308,7 @@ async def dayana_activity_manager():
                         text = await asyncio.to_thread(dayana_generate_bait, context)
                         safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                         await bot.send_message(ALLOWED_CHAT_ID, f"<b>Даяна:</b>\n\n{safe_text}", parse_mode="HTML")
+                        save_dayana_message(ALLOWED_CHAT_ID, text)
 
         except Exception as e:
             print(f"Ошибка в dayana_activity_manager: {e}")
@@ -2597,14 +2673,13 @@ async def cmd_summary(message: types.Message):
         return
     try:
         raw_summary = await asyncio.to_thread(get_ai_summary, all_rows, f"{hours} ч.", len(all_rows))
-        safe_summary = raw_summary.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        full_text = f"<b>🔥 ПРОЖАРКА ЧАТА:</b>\n\n{safe_summary}"
-        dayana_questions = get_dayana_questions(message.chat.id, hours)
-        if dayana_questions:
-            dayana_comments = await asyncio.to_thread(get_dayana_block, dayana_questions)
-            safe_dayana = dayana_comments.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            full_text += f"\n\n<b>🔮 КАК ВЫ МУЧАЛИ МОЮ ПОДРУГУ ДАЯНУ:</b>\n\n{safe_dayana}"
-        await send_long_message(status_msg, full_text)
+        full_text = format_summary_message(raw_summary, f"{hours} ч.")
+        try:
+            await status_msg.edit_text(full_text, parse_mode="HTML")
+        except Exception as e:
+            print(f"Ошибка edit_text HTML саммари ({e}), отправляю через send_long_message...")
+            plain_text = raw_summary.replace("=== ПОДРОБНОСТИ ===", "\n\n--- ПОДРОБНОСТИ ---\n")
+            await send_long_message(status_msg, f"🔥 ПРОЖАРКА ЧАТА за {hours} ч.:\n\n{plain_text}")
     except Exception as e:
         print(f"Ошибка саммари: {type(e).__name__}: {e}")
         summary_cooldown.pop(message.chat.id, None)
@@ -2672,6 +2747,7 @@ async def collect_messages(message: types.Message):
                 raw_advice = await asyncio.to_thread(dayana_advise, user_topic, author)
                 safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await reply_long(message, "<b>💡 Даяна:</b>\n\n", safe_advice)
+                save_dayana_message(message.chat.id, raw_advice)
             except Exception as e:
                 print(f"Ошибка Даяны (совет по реплаю): {e}")
                 await message.reply("Что-то пошло не так, совет отменяется.")
@@ -2690,53 +2766,28 @@ async def collect_messages(message: types.Message):
     elif message.caption:
         save_message(message.chat.id, author, f"[🖼 Медиа с подписью]: {message.caption}", user_id=user_id)
 
-    # ── Обработка текстовых сообщений с упоминанием Даяны ──
-    if message.text:
-        text_lower = message.text.lower()
+    # ── Обработка текстовых сообщений с упоминанием Даяны и реплаев ──
+    msg_text = message.text or message.caption
+    if msg_text:
+        text_lower = msg_text.lower()
 
-        # «кто тебя создал» не должен перехватывать обычные просьбы («Даяна, ответь, кто создал Телеграм»)
-        has_request = any(w in text_lower for w in ("ответь", "рассуди", "посоветуй"))
+        # 1. «кто тебя создал»
+        has_request = any(w in text_lower for w in ("ответь", "рассуди", "посоветуй", "виноват"))
         if "даяна" in text_lower and not has_request and ("создал" in text_lower or "создала" in text_lower or "кто тебя сделал" in text_lower):
-            await message.reply(
+            canned = (
                 "<b>Даяна: </b>\n\n"
                 "Меня создал Николай. Если нужно что-то подобное или есть идея — "
-                'пиши ему: <a href="https://t.me/tbmosa">связаться</a>.',
-                parse_mode="HTML",
-                disable_web_page_preview=True,
+                'пиши ему: <a href="https://t.me/tbmosa">связаться</a>.'
             )
+            await message.reply(canned, parse_mode="HTML", disable_web_page_preview=True)
+            save_dayana_message(message.chat.id, "Меня создал Николай. Если нужно что-то подобное или есть идея — пиши ему: https://t.me/tbmosa")
             return
 
-        if "даяна" in text_lower and "ответь" in text_lower:
-            try:
-                idx = text_lower.index("ответь") + len("ответь")
-                question = message.text[idx:].strip()
-                if not question:
-                    await message.reply("Ответь на что? Вопрос забыл.")
-                    return
-                save_dayana_question(message.chat.id, author, question)
-                typing = asyncio.create_task(keep_typing(message.chat.id))
-                try:
-                    answer, sources, disclaimer = await asyncio.to_thread(ask_dayana, question)
-                finally:
-                    typing.cancel()
-                footer = ""
-                if sources:
-                    links = [
-                        f'<a href="{html.escape(url, quote=True)}">{esc(title[:60])}</a>'
-                        for url, title in sources
-                    ]
-                    footer += "\n\n🔎 " + "\n🔎 ".join(links)
-                footer += f"\n\n<i>{esc(disclaimer)}</i>"
-                await reply_long(message, "<b>Даяна:</b>\n\n", esc(answer), footer, preview=False)
-            except Exception as e:
-                print(f"Ошибка Даяны (ответь): {e}")
-                await message.reply("Не могу ответить прямо сейчас.")
-            return
-
+        # 2. «рассуди» (DeepSeek Pro)
         if "даяна" in text_lower and "рассуди" in text_lower:
             try:
                 idx = text_lower.index("рассуди") + len("рассуди")
-                hint = message.text[idx:].strip() or None
+                hint = msg_text[idx:].strip() or None
                 if message.reply_to_message and message.reply_to_message.date:
                     rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 40, 15)
                 else:
@@ -2747,19 +2798,20 @@ async def collect_messages(message: types.Message):
                 verdict = await asyncio.to_thread(dayana_judge, format_context(rows), hint)
                 safe_verdict = verdict.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await reply_long(message, "<b>⚖️ Даяна:</b>\n\n", safe_verdict)
+                save_dayana_message(message.chat.id, verdict)
             except Exception as e:
                 print(f"Ошибка Даяны (рассуди): {e}")
                 await message.reply("Не могу рассудить прямо сейчас.")
             return
 
-        # «кто виноват(а/ы)» или отдельное слово «виноват»; «Даяна не виновата» — не триггер
+        # 3. «кто виноват» (DeepSeek Pro)
         asks_guilty = "виноват" in text_lower and bool(
             re.search(r"\bкто\b", text_lower) or re.search(r"\bвиноват\b", text_lower)
         )
         if "даяна" in text_lower and asks_guilty:
             try:
                 idx = text_lower.index("виноват") + len("виноват")
-                hint = message.text[idx:].strip() or None
+                hint = msg_text[idx:].strip() or None
                 if message.reply_to_message and message.reply_to_message.date:
                     rows = get_messages_around_timestamp(message.chat.id, message.reply_to_message.date, 30, 10)
                 else:
@@ -2770,43 +2822,86 @@ async def collect_messages(message: types.Message):
                 guilty = await asyncio.to_thread(dayana_guilty, format_context(rows), hint)
                 safe_guilty = guilty.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 await reply_long(message, "<b>👉 Даяна:</b>\n\n", safe_guilty)
+                save_dayana_message(message.chat.id, guilty)
             except Exception as e:
                 print(f"Ошибка Даяны (виноват): {e}")
                 await message.reply("Не могу разобраться прямо сейчас.")
             return
 
-        if "даяна" in text_lower and "посоветуй" in text_lower:
-            try:
-                idx = text_lower.index("посоветуй") + len("посоветуй")
-                user_topic = message.text[idx:].strip(" !?,.:;")
-                if not user_topic:
-                    msg = await bot.send_message(
-                        message.chat.id,
-                        f"<b>{esc(author)}</b>, что именно тебе посоветовать?\n\n"
-                        f"🎬 <b>Фильм, сериал, мультфильм</b>\n"
-                        f"📚 <b>Книгу</b>\n"
-                        f"🍕 <b>Блюдо</b>\n"
-                        f"🎵 <b>Музыку</b>\n"
-                        f"🎮 <b>Игру</b>\n\n"
-                        f"👆 <b>Нажми «Ответить»</b> на это сообщение и напиши категорию или конкретное пожелание.",
-                        parse_mode="HTML",
-                        reply_markup=types.ForceReply(selective=True, input_field_placeholder="фильм на вечер / что поесть")
+        # 4. Бесшовный диалог: реплай на Даяну, обращение по имени или @упоминание
+        is_reply_to_dayana = bool(
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and (
+                (BOT_ID and message.reply_to_message.from_user.id == BOT_ID)
+                or (not BOT_ID and message.reply_to_message.from_user.is_bot)
+            )
+        )
+        name_mentioned = bool(re.search(r"\bдаян[а-яё]*\b", text_lower))
+        bot_mentioned = bool(BOT_USERNAME and f"@{BOT_USERNAME}" in text_lower)
+
+        if is_reply_to_dayana or name_mentioned or bot_mentioned:
+            async with dayana_lock:
+                save_dayana_question(message.chat.id, author, msg_text[:200])
+
+                # Контекст реплая, если пользователь ответил на конкретное сообщение
+                reply_context = ""
+                if message.reply_to_message:
+                    rep_msg = message.reply_to_message
+                    if rep_msg.from_user:
+                        rep_author = "Даяна" if rep_msg.from_user.is_bot else (rep_msg.from_user.full_name or "Участник")
+                    elif rep_msg.sender_chat:
+                        rep_author = rep_msg.sender_chat.title or "Канал"
+                    else:
+                        rep_author = "Участник"
+                    rep_text = rep_msg.text or rep_msg.caption or "[медиасообщение]"
+                    reply_context = f'РЕПЛАЙ: {author} отвечает на сообщение от {rep_author}: "{rep_text}"'
+
+                rows = get_last_messages(message.chat.id, limit=35)
+                chat_context = format_context(rows) if rows else ""
+
+                typing = asyncio.create_task(keep_typing(message.chat.id))
+                try:
+                    answer, sources, disclaimer = await asyncio.to_thread(
+                        ask_dayana_seamless, msg_text, author, chat_context, reply_context
                     )
-                    advice_waiting[(message.chat.id, user_id)] = msg.message_id
+                except Exception as e:
+                    print(f"Ошибка Даяны: {e}")
+                    if is_reply_to_dayana or name_mentioned:
+                        await message.reply("Не могу ответить прямо сейчас.")
+                    return
+                finally:
+                    typing.cancel()
+
+                if not answer or answer == "[ПРОПУСК]" or answer.startswith("[ПРОПУСК]"):
                     return
 
-                raw_advice = await asyncio.to_thread(dayana_advise, user_topic, author)
-                safe_advice = raw_advice.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                await reply_long(message, "<b>💡 Даяна:</b>\n\n", safe_advice)
-            except Exception as e:
-                print(f"Ошибка Даяны (посоветуй): {e}")
-                await message.reply("Не могу ничего посоветовать прямо сейчас.")
+                footer = ""
+                if sources:
+                    links = [
+                        f'<a href="{html.escape(url, quote=True)}">{esc(title[:60])}</a>'
+                        for url, title in sources
+                    ]
+                    footer += "\n\n🔎 " + "\n🔎 ".join(links)
+                if disclaimer:
+                    footer += f"\n\n<i>{esc(disclaimer)}</i>"
+
+                await reply_long(message, "<b>Даяна:</b>\n\n", esc(answer), footer, preview=False)
+                save_dayana_message(message.chat.id, answer)
             return
 
 async def main():
+    global BOT_ID, BOT_USERNAME
     init_db_pool()
     init_db()
     cleanup_old_messages()
+    try:
+        bot_info = await bot.get_me()
+        BOT_ID = bot_info.id
+        BOT_USERNAME = (bot_info.username or "").lower()
+        print(f"Юзернейм бота: @{BOT_USERNAME} (ID: {BOT_ID})")
+    except Exception as e:
+        print(f"Не удалось получить данные бота: {e}")
     print("Бот запущен и готов к работе!")
 
     asyncio.create_task(birthday_checker())
