@@ -651,7 +651,7 @@ def get_dayana_block(questions: list) -> str:
     try:
         return _dayana_complete(
             prompt=prompt,
-            ds_model="deepseek-v4-flash",
+            ds_model="deepseek-flash",
             thinking=False,
             groq_models=["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
             temperature=0.85,
@@ -713,7 +713,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
             print(f"[LOG] DeepSeek: Длина отправляемого текста = {len(prompt)} символов.")
 
             completion = client_deepseek.chat.completions.create(
-                model="deepseek-v4-flash",
+                model="deepseek-flash",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.85,
                 max_tokens=6000,
@@ -767,7 +767,7 @@ def get_ai_summary(rows: list, timeframe_text: str, message_count: int):
 # 9. ДАЯНА — ОБЩИЙ ДИСПЕТЧЕР
 def _dayana_complete(
     prompt: str,
-    ds_model: str = "deepseek-v4-flash",
+    ds_model: str = "deepseek-flash",
     thinking: bool = False,
     groq_models: list = None,
     temperature: float = 0.8,
@@ -832,24 +832,68 @@ DAYANA_DISCLAIMERS = [
     "ИИ — значит, могу налажать. Учти.",
 ]
 
-def ask_dayana(question: str) -> str:
+def _deepseek_search_answer(prompt: str, max_tokens: int):
+    """deepseek-flash с размышлениями и поиском в интернете (поиск идёт на стороне DeepSeek).
+    Возвращает (ответ, [(url, заголовок), ...]) или None, если не вышло."""
+    if client_deepseek is None:
+        return None
+    try:
+        completion = client_deepseek.chat.completions.create(
+            model="deepseek-flash",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            timeout=240,
+            extra_body={
+                "thinking": {"type": "enabled"},
+                "tools": [{"type": "deepseek_web_search"}, {"type": "deepseek_read_url"}],
+            },
+        )
+        data = completion.model_dump()
+        choices = data.get("choices") or []
+        if not choices:
+            print(f"DeepSeek с поиском вернул ошибку: {data.get('error')}")
+            return None
+        msg = choices[0].get("message") or {}
+        answer = (msg.get("content") or "").strip()
+        if not answer:
+            print("DeepSeek с поиском вернул пустой ответ")
+            return None
+        sources = []
+        for item in msg.get("annotations") or []:
+            cite = (item or {}).get("url_citation") or {}
+            url = cite.get("url") or ""
+            if url.startswith(("http://", "https://")) and url not in (s[0] for s in sources):
+                sources.append((url, cite.get("title") or url))
+        return answer, sources[:3]
+    except Exception as e:
+        print(f"DeepSeek с поиском недоступен ({e}), отвечаю без поиска...")
+        return None
+
+def ask_dayana(question: str) -> tuple:
+    """Возвращает (ответ, источники, дисклеймер)."""
     prompt = f"""
 Ты — Даяна. Секретарша со стальными нервами и острым языком.
 Чётко, по существу, без воды. Можешь срезать одной фразой.
 Никаких "конечно!", "отличный вопрос!". Говоришь как живой человек.
 Отвечаешь на русском языке.
+Если ответ зависит от свежих данных (новости, цены, даты, курсы, расписания) — сначала поищи в интернете.
+Пиши обычным текстом, без markdown (никаких **, #, таблиц). Ссылки в тексте не пиши — их добавят отдельно.
 
 ВОПРОС: {question}
 """
-    answer = _dayana_complete(
-        prompt,
-        ds_model="deepseek-v4-flash",
-        thinking=True,
-        temperature=0.8,
-        max_tokens=15000,
-    )
-    disclaimer = random.choice(DAYANA_DISCLAIMERS)
-    return f"{answer}[[DISCLAIMER]]{disclaimer}"
+    found = _deepseek_search_answer(prompt, max_tokens=15000)
+    if found:
+        answer, sources = found
+    else:
+        answer = _dayana_complete(
+            prompt,
+            ds_model="deepseek-flash",
+            thinking=True,
+            temperature=0.8,
+            max_tokens=15000,
+        )
+        sources = []
+    return answer, sources, random.choice(DAYANA_DISCLAIMERS)
 
 # 10. ДАЯНА — РАССУДИТЬ
 def dayana_judge(context: str, hint: str = None) -> str:
@@ -942,7 +986,7 @@ def dayana_advise(topic: str, user_name: str) -> str:
 """
     return _dayana_complete(
         prompt=prompt,
-        ds_model="deepseek-v4-flash",
+        ds_model="deepseek-flash",
         thinking=True,
         groq_models=["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
         temperature=0.8,
@@ -957,7 +1001,7 @@ def dayana_generate_morning_general() -> str:
 Сейчас утро. Пожелай чату доброго утра в своем фирменном стиле (без приторности).
 Пиши коротко: 1-2 предложения. На русском языке. НИ К КОМУ ЛИЧНО НЕ ОБРАЩАЙСЯ, просто поприветствуй всех.
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Доброе утро. Надеюсь, сегодня вы будете продуктивнее, чем вчера.")
+    return _dayana_complete(prompt, ds_model="deepseek-flash", thinking=False, max_tokens=300, fallback_text="Доброе утро. Надеюсь, сегодня вы будете продуктивнее, чем вчера.")
 
 def dayana_generate_morning_personal(user_name: str) -> str:
     prompt = f"""
@@ -965,7 +1009,7 @@ def dayana_generate_morning_personal(user_name: str) -> str:
 Теперь обратись лично к участнику по имени {user_name} и дай ему забавное, дерзкое или ироничное персональное напутствие/предсказание на сегодняшний день.
 Отвечай коротко: 1-2 предложения. На русском языке.
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"А персонально тебе, {user_name}, советую сегодня не принимать важных решений.")
+    return _dayana_complete(prompt, ds_model="deepseek-flash", thinking=False, max_tokens=300, fallback_text=f"А персонально тебе, {user_name}, советую сегодня не принимать важных решений.")
 
 def dayana_generate_evening_general() -> str:
     prompt = """
@@ -973,7 +1017,7 @@ def dayana_generate_evening_general() -> str:
 Сейчас вечер, рабочий день закончен. Спроси у чата, как прошел их день.
 Пиши коротко: 1-2 предложения. На русском языке. НИ К КОМУ ЛИЧНО НЕ ОБРАЩАЙСЯ, просто кинь общий вопрос всем.
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Вечер в хату, коллеги. Кто сегодня выжил, а кто сгорел на работе?")
+    return _dayana_complete(prompt, ds_model="deepseek-flash", thinking=False, max_tokens=300, fallback_text="Вечер в хату, коллеги. Кто сегодня выжил, а кто сгорел на работе?")
 
 def dayana_generate_evening_personal(user_name: str) -> str:
     prompt = f"""
@@ -981,7 +1025,7 @@ def dayana_generate_evening_personal(user_name: str) -> str:
 Теперь обратись лично к участнику по имени {user_name} с ироничным, нестандартным или дерзким вопросом про его планы на вечер.
 Отвечай коротко: 1-2 предложения. На русском языке.
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text=f"А ты, {user_name}, опять будешь весь вечер смотреть в стену?")
+    return _dayana_complete(prompt, ds_model="deepseek-flash", thinking=False, max_tokens=300, fallback_text=f"А ты, {user_name}, опять будешь весь вечер смотреть в стену?")
 
 def dayana_generate_bait(context: str) -> str:
     prompt = f"""
@@ -991,7 +1035,7 @@ def dayana_generate_bait(context: str) -> str:
 ПОСЛЕДНИЕ СООБЩЕНИЯ:
 {context}
 """
-    return _dayana_complete(prompt, ds_model="deepseek-v4-flash", thinking=False, max_tokens=300, fallback_text="Чат уснул? Пора просыпаться, расскажите хоть что-нибудь интересное.")
+    return _dayana_complete(prompt, ds_model="deepseek-flash", thinking=False, max_tokens=300, fallback_text="Чат уснул? Пора просыпаться, расскажите хоть что-нибудь интересное.")
 
 # ДАЯНА — ПОЗДРАВЛЕНИЯ С ДР
 def dayana_birthday_morning(name: str, age: int) -> str:
@@ -1010,7 +1054,7 @@ def dayana_birthday_morning(name: str, age: int) -> str:
 """
     return _dayana_complete(
         prompt,
-        ds_model="deepseek-v4-flash",
+        ds_model="deepseek-flash",
         thinking=False,
         groq_models=["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
         temperature=0.9,
@@ -1028,7 +1072,7 @@ def dayana_birthday_midday(name: str, age: int) -> str:
 """
     return _dayana_complete(
         prompt,
-        ds_model="deepseek-v4-flash",
+        ds_model="deepseek-flash",
         thinking=False,
         groq_models=["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
         temperature=0.9,
@@ -1109,13 +1153,22 @@ def split_for_telegram(text: str) -> list:
         parts.append(text)
     return parts
 
-async def reply_long(message, header: str, body: str, footer: str = ""):
+async def reply_long(message, header: str, body: str, footer: str = "", preview: bool = True):
     """Ответ реплаем; если текст длиннее лимита Telegram — несколькими сообщениями.
-    body должен быть уже экранирован."""
+    body должен быть уже экранирован. preview=False — без карточек-превью ссылок."""
     parts = split_for_telegram(f"{header}{body}{footer}")
-    await message.reply(parts[0], parse_mode="HTML")
+    await message.reply(parts[0], parse_mode="HTML", disable_web_page_preview=not preview)
     for part in parts[1:]:
-        await message.answer(part, parse_mode="HTML")
+        await message.answer(part, parse_mode="HTML", disable_web_page_preview=not preview)
+
+async def keep_typing(chat_id: int):
+    """Показывает «печатает…», пока задачу не отменят. Telegram гасит статус через ~5 секунд."""
+    while True:
+        try:
+            await bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+        await asyncio.sleep(4)
 
 async def send_long_message(target, text: str):
     parts = split_for_telegram(text)
@@ -1185,7 +1238,7 @@ def generate_never_phrase(players: list, chat_context: str = "", used_phrases: l
 """
     phrase = _dayana_complete(
         prompt,
-        ds_model="deepseek-v4-flash",
+        ds_model="deepseek-flash",
         thinking=False,
         groq_models=["openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
         temperature=0.95,
@@ -2661,15 +2714,20 @@ async def collect_messages(message: types.Message):
                     await message.reply("Ответь на что? Вопрос забыл.")
                     return
                 save_dayana_question(message.chat.id, author, question)
-                answer = await asyncio.to_thread(ask_dayana, question)
-                if "[[DISCLAIMER]]" in answer:
-                    main_part, disclaimer_part = answer.split("[[DISCLAIMER]]", 1)
-                else:
-                    main_part, disclaimer_part = answer, None
-                safe_answer = main_part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                if disclaimer_part:
-                    safe_answer += f"\n\n<i>{disclaimer_part}</i>"
-                await reply_long(message, "<b>Даяна:</b>\n\n", safe_answer)
+                typing = asyncio.create_task(keep_typing(message.chat.id))
+                try:
+                    answer, sources, disclaimer = await asyncio.to_thread(ask_dayana, question)
+                finally:
+                    typing.cancel()
+                footer = ""
+                if sources:
+                    links = [
+                        f'<a href="{html.escape(url, quote=True)}">{esc(title[:60])}</a>'
+                        for url, title in sources
+                    ]
+                    footer += "\n\n🔎 " + "\n🔎 ".join(links)
+                footer += f"\n\n<i>{esc(disclaimer)}</i>"
+                await reply_long(message, "<b>Даяна:</b>\n\n", esc(answer), footer, preview=False)
             except Exception as e:
                 print(f"Ошибка Даяны (ответь): {e}")
                 await message.reply("Не могу ответить прямо сейчас.")
