@@ -177,7 +177,9 @@ def save_message(chat_id, user_name, text, user_id=None, is_bot: bool = False):
 
 def save_dayana_message(chat_id: int, text: str):
     if text and text.strip():
-        save_message(chat_id, "Даяна", text.strip(), user_id=BOT_ID, is_bot=True)
+        clean_text = text.strip()
+        print(f"[Даяна]: {clean_text}")
+        save_message(chat_id, "Даяна", clean_text, user_id=BOT_ID, is_bot=True)
 
 def save_dayana_question(chat_id, user_name, question):
     question = question[:500]
@@ -938,6 +940,12 @@ def ask_dayana_seamless(message_text: str, author: str, chat_context: str = "", 
    - Если вопрос требует актуальных данных (новости, курсы валют, погода, факты, расписания) — сначала поищи в интернете.
    - Пиши обычным текстом, без markdown (никаких **, #, таблиц). Ссылки в сам текст не пиши — они добавятся автоматически.
    - Объём: лаконично, 1-4 предложения. Не катай простыни, если не попросили подробностей. Отвечай на русском языке.
+
+3. СТРОГИЙ ЗАПРЕТ ЗАЦИКЛИВАНИЯ И САМОПОВТОРА (КРИТИЧЕСКИ ВАЖНО):
+   - НЕ БУДЬ ЗАЕВШЕЙ ПЛАСТИНКОЙ! Никогда не делай одну шутку, тему, претензию или старую мысль своей постоянной "фишкой" (например, напоминания, Шри-Ланка, чемоданы, паспорта и т.д.).
+   - Если ты уже пошутила или уколола собеседника какой-то темой в предыдущих сообщениях — ТЕМА ЗАКРЫТА. Больше к ней НЕ возвращайся!
+   - Отвечай ТОЛЬКО на то, о чём тебя спросили СЕЙЧАС. Не приплетай старые шутки в каждый новый ответ.
+   - Если спросили "спишь?" — отвечай про сон. Если "что делаешь?" — отвечай про дела. Не тащи прошлый диалог за собой как хвост.
 """
 
     found = _deepseek_search_answer(prompt, max_tokens=15000)
@@ -2857,7 +2865,7 @@ async def collect_messages(message: types.Message):
                     rep_text = rep_msg.text or rep_msg.caption or "[медиасообщение]"
                     reply_context = f'РЕПЛАЙ: {author} отвечает на сообщение от {rep_author}: "{rep_text}"'
 
-                rows = get_last_messages(message.chat.id, limit=35)
+                rows = get_last_messages(message.chat.id, limit=15)
                 chat_context = format_context(rows) if rows else ""
 
                 typing = asyncio.create_task(keep_typing(message.chat.id))
