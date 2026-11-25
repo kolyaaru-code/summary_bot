@@ -35,6 +35,7 @@ MAX_MESSAGE_LENGTH = 4000
 MAX_TEXT_LENGTH = 4000
 MAX_PROMPT_CHARS = 9000
 SUMMARY_COOLDOWN = 60      # секунд между /summary в одном чате
+DAYANA_CONTEXT_LIMIT = 25  # сообщений истории для контекста Даяны
 
 # Настройки игры "Я никогда не"
 NEVER_JOIN_TIMEOUT = 45    # секунд на сбор игроков после первого нажатия
@@ -2865,7 +2866,7 @@ async def collect_messages(message: types.Message):
                     rep_text = rep_msg.text or rep_msg.caption or "[медиасообщение]"
                     reply_context = f'РЕПЛАЙ: {author} отвечает на сообщение от {rep_author}: "{rep_text}"'
 
-                rows = get_last_messages(message.chat.id, limit=15)
+                rows = get_last_messages(message.chat.id, limit=DAYANA_CONTEXT_LIMIT)
                 chat_context = format_context(rows) if rows else ""
 
                 typing = asyncio.create_task(keep_typing(message.chat.id))
